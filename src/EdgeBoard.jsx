@@ -15,6 +15,16 @@ const BOOKMAKER_KEY_MAP = {
   prizepicks: "PrizePicks",
 };
 
+function extractSide(outcomeName) {
+  if (!outcomeName) return null;
+  const lower = outcomeName.toLowerCase();
+  if (lower === "over" || lower.startsWith("over ")) return "Over";
+  if (lower === "under" || lower.startsWith("under ")) return "Under";
+  if (lower === "yes") return "Over";
+  if (lower === "no") return "Under";
+  return null;
+}
+
 function parseLiveOdds(json) {
   const events = Array.isArray(json) ? json : Object.values(json || {}).flat();
   const rows = {};
@@ -26,8 +36,8 @@ function parseLiveOdds(json) {
       (bm.markets || []).forEach((mkt) => {
         const stat = mkt.key.replace(/^player_/, "").replace(/_/g, " ");
         (mkt.outcomes || []).forEach((oc) => {
-          const side = oc.name;
-          if (side !== "Over" && side !== "Under") return;
+          const side = extractSide(oc.name);
+          if (!side) return;
           const player = oc.description || "Unknown player";
           const line = oc.point;
           const id = `${player}|${stat}|${line}|${matchup}`;
