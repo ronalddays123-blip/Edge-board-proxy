@@ -6,6 +6,14 @@
 // Multiple sports: /api/odds?sport=basketball_wnba,basketball_nba,baseball_mlb&markets=h2h
 
 export default async function handler(req, res) {
+  // allow this endpoint to be called from any of your deployment URLs
+  // (production, preview, etc.) without the browser blocking it
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   const {
     sport = "basketball_wnba",
     markets = "h2h,spreads,totals",
@@ -46,3 +54,4 @@ export default async function handler(req, res) {
     res.status(500).json({ error: e.message });
   }
 }
+
