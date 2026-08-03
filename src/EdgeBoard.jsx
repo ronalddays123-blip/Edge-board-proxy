@@ -283,7 +283,42 @@ const SPORT_MARKETS = {
   tennis_atp: "player_total_games_won",
 };
 
-const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
+// Groups fetched rows by player+stat (ignoring exact line) so a PrizePicks
+// number can be compared against whatever sharp books quoted for that same
+// player/stat, even when PrizePicks set a different threshold than the
+// sportsbooks did — which it very often does.
+function buildPPComparison(rows) {
+  const byPlayerStat = {};
+  rows.forEach((row) => {
+    const key = `${row.player}|${row.stat}`;
+    if (!byPlayerStat[key]) byPlayerStat[key] = { player: row.player, stat: row.stat, matchup: row.matchup, lines: [] };
+    byPlayerStat[key].lines.push(row);
+  });
+
+  const out = [];
+  Object.values(byPlayerStat).forEach((group) => {
+    const ppRow = group.lines.find((r) => {
+      const pp = r.books["PrizePicks"];
+      return pp && (pp.over || pp.under);
+    });
+    if (!ppRow) return;
+
+    const sharpCandidates = group.lines
+      .map((r) => ({ row: r, result: computeFairFromBooks(r.books, "Over") }))
+      .filter((c) => c.result && c.result.n >= 1);
+    if (sharpCandidates.length === 0) return;
+
+    const ref = sharpCandidates.sort((a, b) => (b.result.n || 0) - (a.result.n || 0))[0];
+    const sameLine = Number(ref.row.line) === Number(ppRow.line);
+
+    out.push({
+      player: group.player, stat: group.stat, matchup: group.matchup,
+      ppLine: ppRow.line, sharpLine: ref.row.line, sameLine,
+      sharpFairOver: ref.result.fairProb, sharpN: ref.result.n,
+    });
+  });
+  return out;
+}
   const [proxyUrl, setProxyUrl] = useState("");
   const [sport, setSport] = useState("basketball_wnba");
   const [markets, setMarkets] = useState(SPORT_MARKETS.basketball_wnba);
@@ -354,6 +389,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
       books: row.books, include: true, confidence: { n: result.n, spread: result.spread },
     }, { propName: `${row.player}-${row.stat}`, snapshot: { timestamp: Date.now(), side, fairProb: result.fairProb, line: row.line, stat: row.stat } });
   };
+
+  const ppComparison = useMemo(() => buildPPComparison(rows), [rows]);
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.green}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
@@ -432,6 +469,39 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
               </div>
             ))}
             {ranked.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>Nothing clears your filters yet — try lowering min books or min edge.</p>}
+          </div>
+
+          <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.line}` }}>
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 8 }}>PRIZEPICKS VS SHARP MARKET</div>
+            {ppComparison.length === 0 ? (
+              <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No PrizePicks lines came back in this fetch — either this sport/market combo doesn't have them, or ParlayAPI doesn't carry PrizePicks data at all. Not something this code controls.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {ppComparison.map((c, i) => (
+                  <div key={i} style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
+                    <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{c.player} — {c.stat}</div>
+                    <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono, marginBottom: 4 }}>{c.matchup}</div>
+                    {c.sameLine ? (
+                      <div style={{ fontFamily: mono, fontSize: 12 }}>
+                        <span style={{ color: COLORS.text }}>PP line matches sharp line: {c.ppLine}</span>{" "}
+                        <span style={{ color: c.sharpFairOver > 0.5 ? COLORS.green : COLORS.red }}>
+                          · Over fair {pct(c.sharpFairOver)} ({c.sharpN} bk{c.sharpN > 1 ? "s" : ""})
+                        </span>
+                      </div>
+                    ) : (
+                      <div style={{ fontFamily: mono, fontSize: 12 }}>
+                        <span style={{ color: COLORS.amber }}>PP: {c.ppLine} vs sharp: {c.sharpLine}</span>{" "}
+                        <span style={{ color: COLORS.faint }}>
+                          — different thresholds, can't give an exact number. {Number(c.ppLine) < Number(c.sharpLine)
+                            ? "PP set lower, so Over is directionally easier there than at the sharp line."
+                            : "PP set higher, so Under is directionally easier there than at the sharp line."}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}
