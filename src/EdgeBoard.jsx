@@ -271,10 +271,23 @@ const cellColor = (bookKey, leg) => {
   return "neutral";
 };
 
+const SPORT_MARKETS = {
+  basketball_wnba: "player_points,player_rebounds,player_assists",
+  basketball_nba: "player_points,player_rebounds,player_assists",
+  baseball_mlb: "player_hits,player_home_runs,player_strikeouts",
+  americanfootball_nfl: "player_pass_yds,player_rush_yds,player_receptions",
+  icehockey_nhl: "player_points,player_shots_on_goal,player_goals",
+  soccer_epl: "player_shots_on_target,player_goals,player_assists",
+  soccer_uefa_champs_league: "player_shots_on_target,player_goals,player_assists",
+  mma_mixed_martial_arts: "fight_winner",
+  tennis_atp: "player_total_games_won",
+};
+
 const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   const [proxyUrl, setProxyUrl] = useState("");
   const [sport, setSport] = useState("basketball_wnba");
-  const [markets, setMarkets] = useState("player_points,player_rebounds,player_assists");
+  const [markets, setMarkets] = useState(SPORT_MARKETS.basketball_wnba);
+  const [marketsTouched, setMarketsTouched] = useState(false);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -354,14 +367,30 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
         <Field label="Sport">
-          <select style={{ ...inputStyle, cursor: "pointer" }} value={sport} onChange={(e) => setSport(e.target.value)}>
+          <select style={{ ...inputStyle, cursor: "pointer" }} value={sport} onChange={(e) => {
+            const next = e.target.value;
+            setSport(next);
+            if (!marketsTouched) setMarkets(SPORT_MARKETS[next] || "");
+          }}>
             <option value="basketball_wnba">WNBA</option>
             <option value="basketball_nba">NBA</option>
             <option value="baseball_mlb">MLB</option>
             <option value="americanfootball_nfl">NFL</option>
+            <option value="icehockey_nhl">NHL</option>
+            <option value="soccer_epl">Soccer — EPL</option>
+            <option value="soccer_uefa_champs_league">Soccer — Champions League</option>
+            <option value="mma_mixed_martial_arts">MMA</option>
+            <option value="tennis_atp">Tennis — ATP</option>
           </select>
         </Field>
-        <Field label="Markets"><input style={inputStyle} value={markets} onChange={(e) => setMarkets(e.target.value)} /></Field>
+        <Field label="Markets">
+          <input style={inputStyle} value={markets} onChange={(e) => { setMarkets(e.target.value); setMarketsTouched(true); }} />
+          {marketsTouched && (
+            <button onClick={() => { setMarketsTouched(false); setMarkets(SPORT_MARKETS[sport] || ""); }} style={{ background: "none", border: "none", color: COLORS.green, fontFamily: mono, fontSize: 10, padding: "2px 0", cursor: "pointer", textAlign: "left" }}>
+              reset to {sport} defaults
+            </button>
+          )}
+        </Field>
       </div>
       <button onClick={fetchLive} disabled={loading} style={{ display: "flex", alignItems: "center", gap: 6, background: COLORS.green, color: "#04140D", border: "none", borderRadius: 6, padding: "9px 14px", fontFamily: sans, fontWeight: 600, fontSize: 13, cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1, marginBottom: 12 }}>
         <RefreshCw size={15} /> {loading ? "Fetching…" : "Fetch live props"}
