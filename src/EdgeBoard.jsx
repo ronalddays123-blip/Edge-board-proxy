@@ -319,6 +319,8 @@ function buildPPComparison(rows) {
   });
   return out;
 }
+
+const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   const [proxyUrl, setProxyUrl] = useState("");
   const [sport, setSport] = useState("basketball_wnba");
   const [markets, setMarkets] = useState(SPORT_MARKETS.basketball_wnba);
