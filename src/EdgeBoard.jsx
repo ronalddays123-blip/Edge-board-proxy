@@ -278,6 +278,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [minBooks, setMinBooks] = useState(2);
+  const [minEdge, setMinEdge] = useState(3);
 
   useEffect(() => {
     (async () => {
@@ -309,6 +311,26 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
     }
     setLoading(false);
   };
+
+  // rank every fetched row by its strongest side's edge off a 50% coin flip —
+  // that's the real signal for a single-leg PrizePicks-style pick, since the
+  // vig is already stripped out on both sides by this point
+  const ranked = useMemo(() => {
+    return rows
+      .map((row) => {
+        const overResult = computeFairFromBooks(row.books, "Over");
+        const underResult = computeFairFromBooks(row.books, "Under");
+        const best = (overResult?.fairProb ?? 0) >= (underResult?.fairProb ?? 0)
+          ? { side: "Over", ...overResult }
+          : { side: "Under", ...underResult };
+        if (!best.fairProb) return null;
+        const edgePts = (best.fairProb - 0.5) * 100;
+        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, edgePts };
+      })
+      .filter(Boolean)
+      .filter((r) => r.n >= minBooks && r.edgePts >= minEdge)
+      .sort((a, b) => b.edgePts - a.edgePts);
+  }, [rows, minBooks, minEdge]);
 
   const addFromRow = (row, side) => {
     const result = computeFairFromBooks(row.books, side);
@@ -342,26 +364,47 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
         <Field label="Markets"><input style={inputStyle} value={markets} onChange={(e) => setMarkets(e.target.value)} /></Field>
       </div>
       <button onClick={fetchLive} disabled={loading} style={{ display: "flex", alignItems: "center", gap: 6, background: COLORS.green, color: "#04140D", border: "none", borderRadius: 6, padding: "9px 14px", fontFamily: sans, fontWeight: 600, fontSize: 13, cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1, marginBottom: 12 }}>
-        <RefreshCw size={15} className={loading ? "spin" : ""} /> {loading ? "Fetching…" : "Fetch live props"}
+        <RefreshCw size={15} /> {loading ? "Fetching…" : "Fetch live props"}
       </button>
 
       {error && <div style={{ display: "flex", gap: 6, color: COLORS.amber, fontSize: 12, marginBottom: 12, fontFamily: sans }}><AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} /> {error}</div>}
 
       {rows.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
-          {rows.map((row, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
-              <div>
-                <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{row.player} — {row.stat} {row.line}</div>
-                <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>{row.matchup}</div>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => addFromRow(row, "Over")} style={{ fontFamily: mono, fontSize: 11, padding: "5px 8px", borderRadius: 5, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer" }}>+Over</button>
-                <button onClick={() => addFromRow(row, "Under")} style={{ fontFamily: mono, fontSize: 11, padding: "5px 8px", borderRadius: 5, border: `1px solid ${COLORS.red}`, color: COLORS.red, background: "transparent", cursor: "pointer" }}>+Under</button>
-              </div>
+        <>
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.faint }}>MIN BOOKS</span>
+              <select style={{ ...inputStyle, width: 60, padding: "4px 6px" }} value={minBooks} onChange={(e) => setMinBooks(Number(e.target.value))}>
+                <option value={1}>1+</option><option value={2}>2+</option><option value={3}>3+</option>
+              </select>
             </div>
-          ))}
-        </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.faint }}>MIN EDGE</span>
+              <select style={{ ...inputStyle, width: 70, padding: "4px 6px" }} value={minEdge} onChange={(e) => setMinEdge(Number(e.target.value))}>
+                <option value={0}>0pt</option><option value={3}>3pt</option><option value={5}>5pt</option><option value={8}>8pt</option>
+              </select>
+            </div>
+            <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.faint }}>{ranked.length} of {rows.length} pass filters</span>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 400, overflowY: "auto" }}>
+            {ranked.map((row, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${i < 3 ? COLORS.green : COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{row.player} — {row.stat} {row.line}</div>
+                  <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>{row.matchup}</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 3, fontFamily: mono, fontSize: 11 }}>
+                    <span style={{ color: COLORS.green, fontWeight: 700 }}>{row.bestSide} favored · {pct(row.bestFairProb)}</span>
+                    <span style={{ color: COLORS.amber }}>+{row.edgePts.toFixed(1)}pt edge</span>
+                    <span style={{ color: row.n === 1 ? COLORS.amber : COLORS.faint }}>{row.n} bk{row.n > 1 ? "s" : ""}</span>
+                  </div>
+                </div>
+                <button onClick={() => addFromRow(row, row.bestSide)} style={{ fontFamily: mono, fontSize: 11, padding: "6px 10px", borderRadius: 5, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer", flexShrink: 0, marginLeft: 8 }}>+ Add {row.bestSide}</button>
+              </div>
+            ))}
+            {ranked.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>Nothing clears your filters yet — try lowering min books or min edge.</p>}
+          </div>
+        </>
       )}
     </div>
   );
