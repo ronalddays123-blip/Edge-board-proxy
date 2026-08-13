@@ -404,6 +404,28 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
           <input style={inputStyle} value={proxyUrl} onChange={(e) => saveUrl(e.target.value)} placeholder="https://edge-board-proxy.vercel.app" />
         </Field>
       </div>
+      <div style={{ marginBottom: 10 }}>
+        <Field label="Favorites">
+          <div style={{ display: "flex", gap: 6 }}>
+            {[
+              { label: "WNBA", value: "basketball_wnba" },
+              { label: "NBA", value: "basketball_nba" },
+              { label: "NFL", value: "americanfootball_nfl" },
+            ].map((f) => (
+              <button
+                key={f.value}
+                onClick={() => {
+                  setSport(f.value);
+                  if (!marketsTouched) setMarkets(SPORT_MARKETS[f.value] || "");
+                }}
+                style={{ ...chipStyle(sport === f.value), flex: 1 }}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
         <Field label="Sport">
           <select style={{ ...inputStyle, cursor: "pointer" }} value={sport} onChange={(e) => {
@@ -413,8 +435,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
           }}>
             <option value="basketball_wnba">WNBA</option>
             <option value="basketball_nba">NBA</option>
-            <option value="baseball_mlb">MLB</option>
             <option value="americanfootball_nfl">NFL</option>
+            <option value="baseball_mlb">MLB</option>
             <option value="icehockey_nhl">NHL</option>
             <option value="soccer_epl">Soccer — EPL</option>
             <option value="soccer_uefa_champs_league">Soccer — Champions League</option>
@@ -700,6 +722,110 @@ const BoardRow = memo(function BoardRow({ leg, onToggle, onRemove }) {
   );
 });
 
+// Buckets graded predictions by their predicted probability and compares
+// predicted rate vs actual hit rate per bucket — the core calibration check.
+// A well-calibrated model's "60% picks" should hit ~60% of the time; if your
+// 60% bucket is actually hitting 45%, that bucket's numbers aren't trustworthy
+// even though the math inside them is internally consistent.
+function buildCalibrationReport(predictions) {
+  const graded = predictions.filter((p) => p.result === "hit" || p.result === "miss");
+  const buckets = [
+    [0.5, 0.55], [0.55, 0.6], [0.6, 0.65], [0.65, 0.7], [0.7, 0.75],
+    [0.75, 0.8], [0.8, 0.85], [0.85, 0.9], [0.9, 1.01],
+  ];
+  const report = buckets.map(([lo, hi]) => {
+    const inBucket = graded.filter((p) => p.fairProb >= lo && p.fairProb < hi);
+    const hits = inBucket.filter((p) => p.result === "hit").length;
+    return {
+      label: `${Math.round(lo * 100)}-${Math.round(Math.min(hi, 1) * 100)}%`,
+      n: inBucket.length,
+      predicted: inBucket.length ? (inBucket.reduce((s, p) => s + p.fairProb, 0) / inBucket.length) * 100 : null,
+      actual: inBucket.length ? (hits / inBucket.length) * 100 : null,
+    };
+  }).filter((b) => b.n > 0);
+
+  const brier = graded.length
+    ? graded.reduce((s, p) => s + Math.pow((p.result === "hit" ? 1 : 0) - p.fairProb, 2), 0) / graded.length
+    : null;
+
+  return { report, graded, brier, totalHits: graded.filter((p) => p.result === "hit").length };
+}
+
+const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }) {
+  const ungraded = predictions.filter((p) => p.result === null).sort((a, b) => b.timestamp - a.timestamp);
+  const { report, graded, brier, totalHits } = useMemo(() => buildCalibrationReport(predictions), [predictions]);
+
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
+      <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 4 }}>CALIBRATION TRACKER</div>
+      <p style={{ color: COLORS.faint, fontSize: 11, margin: "0 0 14px", lineHeight: 1.5 }}>
+        Every leg you add gets logged automatically. Once you know how a prop actually turned out, grade it below —
+        that's what lets this report tell you whether "60% fair" picks are actually hitting close to 60%.
+      </p>
+
+      {graded.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 14 }}>
+            <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
+              <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: mono }}>GRADED / HIT RATE</div>
+              <div style={{ fontSize: 18, color: COLORS.text, fontFamily: mono, marginTop: 4 }}>{graded.length} · {((totalHits / graded.length) * 100).toFixed(1)}%</div>
+            </div>
+            <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
+              <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: mono }}>BRIER SCORE (lower = better)</div>
+              <div style={{ fontSize: 18, color: COLORS.text, fontFamily: mono, marginTop: 4 }}>{brier.toFixed(3)}</div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 40px", fontFamily: mono, fontSize: 10, color: COLORS.faint }}>
+              <span>BUCKET</span><span>PREDICTED</span><span>ACTUAL</span><span>N</span>
+            </div>
+            {report.map((b) => {
+              const gap = b.actual - b.predicted;
+              const flag = Math.abs(gap) >= 10 && b.n >= 5;
+              return (
+                <div key={b.label} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 40px", fontFamily: mono, fontSize: 12, alignItems: "center", padding: "4px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                  <span style={{ color: COLORS.text }}>{b.label}</span>
+                  <span style={{ color: COLORS.faint }}>{b.predicted.toFixed(1)}%</span>
+                  <span style={{ color: flag ? COLORS.red : COLORS.green }}>{b.actual.toFixed(1)}%{flag ? " ⚠" : ""}</span>
+                  <span style={{ color: COLORS.faint }}>{b.n}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p style={{ color: COLORS.faint, fontSize: 10, margin: "8px 0 0", fontFamily: mono }}>
+            ⚠ flags buckets where actual hit rate is 10+ points off predicted, with at least 5 graded picks — small
+            sample sizes will bounce around a lot, so don't over-read a bucket with only 2-3 picks in it.
+          </p>
+        </div>
+      )}
+
+      {ungraded.length > 0 && (
+        <div>
+          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.amber, marginBottom: 8 }}>{ungraded.length} UNGRADED</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto" }}>
+            {ungraded.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "7px 10px" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: COLORS.text, fontSize: 12, fontWeight: 600 }}>{p.player} {p.side} {p.line} {p.stat}</div>
+                  <div style={{ color: COLORS.faint, fontSize: 10, fontFamily: mono }}>{pct(p.fairProb)} fair · {p.matchup}</div>
+                </div>
+                <div style={{ display: "flex", gap: 4, flexShrink: 0, marginLeft: 8 }}>
+                  <button onClick={() => onGrade(p.id, "hit")} style={{ fontFamily: mono, fontSize: 10, padding: "4px 7px", borderRadius: 4, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer" }}>Hit</button>
+                  <button onClick={() => onGrade(p.id, "miss")} style={{ fontFamily: mono, fontSize: 10, padding: "4px 7px", borderRadius: 4, border: `1px solid ${COLORS.red}`, color: COLORS.red, background: "transparent", cursor: "pointer" }}>Miss</button>
+                  <button onClick={() => onGrade(p.id, "push")} style={{ fontFamily: mono, fontSize: 10, padding: "4px 7px", borderRadius: 4, border: `1px solid ${COLORS.faint}`, color: COLORS.faint, background: "transparent", cursor: "pointer" }}>Push</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {predictions.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No picks logged yet — add a leg above and it'll show up here to grade later.</p>}
+    </div>
+  );
+});
+
 export default function EdgeBoard() {
   const [legs, setLegs] = useState([]);
   const [entryType, setEntryType] = useState("power");
@@ -713,6 +839,47 @@ export default function EdgeBoard() {
   const [selectedHistoryProp, setSelectedHistoryProp] = useState(null);
   const [historyData, setHistoryData] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  const [predictions, setPredictions] = useState([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get("predictions-log");
+        setPredictions(res ? JSON.parse(res.value) : []);
+      } catch (e) {
+        setPredictions([]);
+      }
+    })();
+  }, []);
+
+  const savePredictions = useCallback(async (next) => {
+    setPredictions(next);
+    try {
+      await window.storage.set("predictions-log", JSON.stringify(next));
+    } catch (e) {
+      console.error("storage error", e);
+    }
+  }, []);
+
+  const logPrediction = useCallback((leg) => {
+    setPredictions((prev) => {
+      const next = [...prev, {
+        id: leg.id, player: leg.name, stat: leg.stat, line: leg.line, side: leg.side,
+        matchup: leg.matchup, fairProb: leg.fairProb, timestamp: Date.now(), result: null,
+      }];
+      window.storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const gradePrediction = useCallback((id, result) => {
+    setPredictions((prev) => {
+      const next = prev.map((p) => (p.id === id ? { ...p, result } : p));
+      window.storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -761,7 +928,8 @@ export default function EdgeBoard() {
   const handleAddLeg = useCallback((leg, historyEntry) => {
     setLegs((prev) => [...prev, leg]);
     if (historyEntry) logSnapshot(historyEntry.propName, historyEntry.snapshot);
-  }, [logSnapshot]);
+    logPrediction(leg);
+  }, [logSnapshot, logPrediction]);
 
   const removeLeg = useCallback((id) => setLegs((prev) => prev.filter((l) => l.id !== id)), []);
   const toggleLeg = useCallback((id) => setLegs((prev) => prev.map((l) => (l.id === id ? { ...l, include: !l.include } : l))), []);
@@ -903,6 +1071,8 @@ export default function EdgeBoard() {
             </div>
           </div>
         )}
+
+        <CalibrationPanel predictions={predictions} onGrade={gradePrediction} />
 
         <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 12 }}>
