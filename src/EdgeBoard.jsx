@@ -309,8 +309,11 @@ const cellColor = (bookKey, leg) => {
 const SPORT_MARKETS = {
   basketball_wnba: "player_points,player_rebounds,player_assists",
   basketball_nba: "player_points,player_rebounds,player_assists",
+  basketball_ncaab: "player_points,player_rebounds,player_assists",
   baseball_mlb: "player_hits,player_home_runs,player_strikeouts",
   americanfootball_nfl: "player_pass_yds,player_rush_yds,player_receptions",
+  americanfootball_nfl_preseason: "player_pass_yds,player_rush_yds,player_receptions",
+  americanfootball_ncaaf: "player_pass_yds,player_rush_yds,player_receptions",
   icehockey_nhl: "player_points,player_shots_on_goal,player_goals",
   soccer_epl: "player_shots_on_target,player_goals,player_assists",
   soccer_uefa_champs_league: "player_shots_on_target,player_goals,player_assists",
@@ -318,25 +321,69 @@ const SPORT_MARKETS = {
   tennis_atp: "player_total_games_won",
 };
 
+// PrizePicks' own league naming doesn't match the-odds-api-style sport keys,
+// so this bridges the two. These are best-effort based on common PrizePicks
+// league_ppid values — worth confirming against a real fetch, since
+// PrizePicks controls this naming and could differ from what's assumed here.
+const SPORT_TO_PP_LEAGUE = {
+  basketball_wnba: "WNBA",
+  basketball_nba: "NBA",
+  basketball_ncaab: "CBB",
+  baseball_mlb: "MLB",
+  americanfootball_nfl: "NFL",
+  americanfootball_nfl_preseason: "NFL",
+  americanfootball_ncaaf: "CFB",
+  icehockey_nhl: "NHL",
+  soccer_epl: "EPL",
+  soccer_uefa_champs_league: "UEFA CHAMPIONS LEAGUE",
+  mma_mixed_martial_arts: "MMA",
+  tennis_atp: "TENNIS",
+};
+
 // Groups fetched rows by player+stat (ignoring exact line) so a PrizePicks
 // number can be compared against whatever sharp books quoted for that same
 // player/stat, even when PrizePicks set a different threshold than the
 // sportsbooks did — which it very often does.
-function buildPPComparison(rows) {
-  const byPlayerStat = {};
-  rows.forEach((row) => {
-    const key = `${row.player}|${row.stat}`;
-    if (!byPlayerStat[key]) byPlayerStat[key] = { player: row.player, stat: row.stat, matchup: row.matchup, lines: [] };
-    byPlayerStat[key].lines.push(row);
+// Parses the raw PrizePicks projections response into flat rows. Handles
+// both player props (event_type "matchup") and team props (event_type
+// "team", e.g. a team's total pitches thrown) — PrizePicks' own "description"
+// field already holds the right name either way, so both come through the
+// same path. Filters to the requested league and to standard lines only
+// (goblin/demon are boosted/discounted variants of the same prop, not a
+// separate line worth comparing against the sharp market).
+function parsePrizePicksData(json, ppLeague) {
+  const items = json?.data || [];
+  return items
+    .filter((it) => it.attributes?.odds_type === "standard")
+    .filter((it) => !ppLeague || (it.attributes?.league_ppid || "").toUpperCase() === ppLeague.toUpperCase())
+    .map((it) => ({
+      name: it.attributes?.description || "Unknown",
+      stat: it.attributes?.stat_display_name || it.attributes?.stat_type || "",
+      line: it.attributes?.line_score,
+      isTeam: it.attributes?.event_type === "team",
+      startTime: it.attributes?.start_time,
+      status: it.attributes?.status,
+    }))
+    .filter((r) => r.line != null);
+}
+
+// Matches real PrizePicks projections (fetched separately, since PrizePicks
+// isn't a bookmaker inside the sharp-odds feed) against sharp-book rows by
+// player/team name + stat. Same exact/interpolated/nearest tiering as
+// before, just fed from two independent sources instead of one merged feed.
+function buildPPComparison(sharpRows, ppRows) {
+  const bySharpKey = {};
+  sharpRows.forEach((row) => {
+    const key = `${row.player.toLowerCase()}|${row.stat.toLowerCase()}`;
+    if (!bySharpKey[key]) bySharpKey[key] = { player: row.player, stat: row.stat, matchup: row.matchup, lines: [] };
+    bySharpKey[key].lines.push(row);
   });
 
   const out = [];
-  Object.values(byPlayerStat).forEach((group) => {
-    const ppRow = group.lines.find((r) => {
-      const pp = r.books["PrizePicks"];
-      return pp && (pp.over || pp.under);
-    });
-    if (!ppRow) return;
+  ppRows.forEach((ppRow) => {
+    const key = `${ppRow.name.toLowerCase()}|${ppRow.stat.toLowerCase()}`;
+    const group = bySharpKey[key];
+    if (!group) return;
     const ppLine = Number(ppRow.line);
     if (isNaN(ppLine)) return;
 
@@ -346,20 +393,16 @@ function buildPPComparison(rows) {
       .sort((a, b) => a.line - b.line);
     if (sharpCandidates.length === 0) return;
 
-    // exact match — best case, no approximation needed
     const exact = sharpCandidates.find((c) => c.line === ppLine);
     if (exact) {
       out.push({
-        player: group.player, stat: group.stat, matchup: group.matchup, ppLine,
+        player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam,
         sharpLine: `${exact.line}`, method: "exact",
         sharpFairOver: exact.result.fairProb, sharpN: exact.result.n,
       });
       return;
     }
 
-    // no exact match — if a sharp line exists on both sides of PP's number,
-    // linearly interpolate between them for a closer estimate at PP's exact
-    // threshold, rather than settling for whichever single line is nearest
     const below = [...sharpCandidates].reverse().find((c) => c.line < ppLine);
     const above = sharpCandidates.find((c) => c.line > ppLine);
 
@@ -367,23 +410,23 @@ function buildPPComparison(rows) {
       const weight = (ppLine - below.line) / (above.line - below.line);
       const interpFair = below.result.fairProb + (above.result.fairProb - below.result.fairProb) * weight;
       out.push({
-        player: group.player, stat: group.stat, matchup: group.matchup, ppLine,
+        player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam,
         sharpLine: `${below.line}–${above.line}`, method: "interpolated",
         sharpFairOver: interpFair, sharpN: Math.min(below.result.n, above.result.n),
       });
       return;
     }
 
-    // only lines on one side exist — fall back to the single nearest one
     const nearest = [...sharpCandidates].sort((a, b) => Math.abs(a.line - ppLine) - Math.abs(b.line - ppLine))[0];
     out.push({
-      player: group.player, stat: group.stat, matchup: group.matchup, ppLine,
+      player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam,
       sharpLine: `${nearest.line}`, method: "nearest", distance: Math.abs(nearest.line - ppLine),
       sharpFairOver: nearest.result.fairProb, sharpN: nearest.result.n,
     });
   });
   return out;
 }
+
 
 // Greedy-builds a slip for each size 2-6: sorts candidates by fair
 // probability, takes the strongest leg from each distinct matchup (never two
@@ -467,6 +510,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   const [markets, setMarkets] = useState(SPORT_MARKETS.basketball_wnba);
   const [marketsTouched, setMarketsTouched] = useState(false);
   const [rows, setRows] = useState([]);
+  const [ppRows, setPpRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [minBooks, setMinBooks] = useState(2);
@@ -488,15 +532,29 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
 
   const fetchLive = async () => {
     if (!proxyUrl) return setError("Paste your deployed proxy URL first.");
-    setLoading(true); setError(""); setRows([]);
+    setLoading(true); setError(""); setRows([]); setPpRows([]);
     try {
       const base = proxyUrl.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/odds?sport=${sport}&markets=${markets}`);
-      const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      const parsed = parseLiveOdds(json);
+
+      const [oddsRes, ppRes] = await Promise.all([
+        fetch(`${base}/api/odds?sport=${sport}&markets=${markets}`),
+        fetch(`${base}/api/prizepicks`).catch(() => null),
+      ]);
+
+      const oddsJson = await oddsRes.json();
+      if (oddsJson.error) throw new Error(oddsJson.error);
+      const parsed = parseLiveOdds(oddsJson);
       setRows(parsed);
       if (parsed.length === 0) setError("Connected, but found no player prop rows — the response shape may differ from what this expects. Check the raw JSON and let me know its structure.");
+
+      if (ppRes && ppRes.ok) {
+        try {
+          const ppJson = await ppRes.json();
+          setPpRows(parsePrizePicksData(ppJson, SPORT_TO_PP_LEAGUE[sport]));
+        } catch (e) {
+          // PrizePicks fetch failing doesn't block the sharp-odds fetch above
+        }
+      }
     } catch (e) {
       setError(`Fetch failed: ${e.message}. Remember this only works when Edge Board is deployed live, not inside the Claude.ai preview.`);
     }
@@ -534,7 +592,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
     }, { propName: `${row.player}-${row.stat}`, snapshot: { timestamp: Date.now(), side, fairProb: result.fairProb, line: row.line, stat: row.stat } });
   };
 
-  const ppComparison = useMemo(() => buildPPComparison(rows), [rows]);
+  const ppComparison = useMemo(() => buildPPComparison(rows, ppRows), [rows, ppRows]);
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.green}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
@@ -548,11 +606,14 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
       </div>
       <div style={{ marginBottom: 10 }}>
         <Field label="Favorites">
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {[
               { label: "WNBA", value: "basketball_wnba" },
               { label: "NBA", value: "basketball_nba" },
               { label: "NFL", value: "americanfootball_nfl" },
+              { label: "NFL Pre", value: "americanfootball_nfl_preseason" },
+              { label: "CFB", value: "americanfootball_ncaaf" },
+              { label: "CBB", value: "basketball_ncaab" },
             ].map((f) => (
               <button
                 key={f.value}
@@ -560,7 +621,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
                   setSport(f.value);
                   if (!marketsTouched) setMarkets(SPORT_MARKETS[f.value] || "");
                 }}
-                style={{ ...chipStyle(sport === f.value), flex: 1 }}
+                style={{ ...chipStyle(sport === f.value), flex: "1 1 30%" }}
               >
                 {f.label}
               </button>
@@ -577,7 +638,10 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
           }}>
             <option value="basketball_wnba">WNBA</option>
             <option value="basketball_nba">NBA</option>
+            <option value="basketball_ncaab">College Basketball</option>
             <option value="americanfootball_nfl">NFL</option>
+            <option value="americanfootball_nfl_preseason">NFL Preseason</option>
+            <option value="americanfootball_ncaaf">College Football</option>
             <option value="baseball_mlb">MLB</option>
             <option value="icehockey_nhl">NHL</option>
             <option value="soccer_epl">Soccer — EPL</option>
@@ -652,7 +716,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
           <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.line}` }}>
             <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 8 }}>PRIZEPICKS VS SHARP MARKET</div>
             {ppComparison.length === 0 ? (
-              <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No PrizePicks lines came back in this fetch — either this sport/market combo doesn't have them, or ParlayAPI doesn't carry PrizePicks data at all. Not something this code controls.</p>
+              <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No matches — either PrizePicks doesn't have this league live right now, or none of its lines matched a name+stat from the sharp fetch above. This now pulls PrizePicks directly (unofficial endpoint), so an empty result here is about matching or timing, not missing data entirely.</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {ppComparison.map((c, i) => (
@@ -767,7 +831,7 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-        <Field label="Player"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Jackie Young" /></Field>
+        <Field label="Player / Team"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Jackie Young, or CIN for a team total" /></Field>
         <Field label="Matchup"><input style={inputStyle} value={matchup} onChange={(e) => setMatchup(e.target.value)} placeholder="e.g. LVA vs. NYL" /></Field>
       </div>
 
