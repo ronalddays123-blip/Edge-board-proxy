@@ -278,6 +278,23 @@ const chipStyle = (active) => ({
   color: active ? COLORS.green : COLORS.muted, fontWeight: 600,
 });
 
+// A composite grade for how much to TRUST a number, not how likely it is to
+// win — those are different things, and treating them as the same is exactly
+// the overconfidence that gets people in trouble. A "C" pick can hit and an
+// "A+" pick can miss; the grade only reflects edge size, book agreement, and
+// how many books back the number. It cannot and does not predict outcomes.
+function gradeForPick(edgePts, n, spread) {
+  const confidenceMult = n >= 3 ? 1 : n === 2 ? 0.8 : 0.55;
+  const spreadPenalty = (spread || 0) * 100 * 0.6;
+  const score = Math.max(0, edgePts * confidenceMult - spreadPenalty);
+
+  if (score >= 12) return { letter: "A+", color: "#35C48C", score };
+  if (score >= 8) return { letter: "A", color: "#35C48C", score };
+  if (score >= 5) return { letter: "B", color: "#3E9CFF", score };
+  if (score >= 2) return { letter: "C", color: "#E8A33D", score };
+  return { letter: "D", color: "#7C8894", score };
+}
+
 const cellColor = (bookKey, leg) => {
   const b = leg.books?.[bookKey];
   const oddsSide = leg.side === "Over" ? b?.over : b?.under;
@@ -393,7 +410,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
           : { side: "Under", ...underResult };
         if (!best.fairProb) return null;
         const edgePts = (best.fairProb - 0.5) * 100;
-        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, edgePts };
+        const grade = gradeForPick(edgePts, best.n, best.spread);
+        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade };
       })
       .filter(Boolean)
       .filter((r) => r.n >= minBooks && r.edgePts >= minEdge)
@@ -495,9 +513,17 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
             <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.faint }}>{ranked.length} of {rows.length} pass filters</span>
           </div>
 
+          <p style={{ color: COLORS.faint, fontSize: 10, fontFamily: mono, marginTop: 0, marginBottom: 10, lineHeight: 1.5 }}>
+            Grade = edge size × book agreement, not win probability. A "D" pick and an "A+" pick can both hit or miss —
+            the letter tells you how much to trust the number, not what will happen.
+          </p>
+
           <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 400, overflowY: "auto" }}>
             {ranked.map((row, i) => (
               <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${i < 3 ? COLORS.green : COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 6, background: "rgba(255,255,255,0.05)", border: `1px solid ${row.grade.color}`, color: row.grade.color, fontFamily: mono, fontSize: 13, fontWeight: 700, flexShrink: 0, marginRight: 10 }}>
+                  {row.grade.letter}
+                </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{row.player} — {row.stat} {row.line}</div>
                   <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>{row.matchup}</div>
@@ -707,7 +733,14 @@ const BoardRow = memo(function BoardRow({ leg, onToggle, onRemove }) {
         <div style={{ color: COLORS.faint, fontSize: 11, marginTop: 2 }}>{leg.stat}</div>
       </td>
       <td style={{ padding: "10px 10px 10px 0" }}>
-        <div style={{ fontFamily: mono, fontSize: 14, color: COLORS.text, fontWeight: 600 }}>{pct(leg.fairProb)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ fontFamily: mono, fontSize: 14, color: COLORS.text, fontWeight: 600 }}>{pct(leg.fairProb)}</div>
+          {leg.confidence && (
+            <span style={{ fontFamily: mono, fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4, border: `1px solid ${gradeForPick((leg.fairProb - 0.5) * 100, leg.confidence.n, leg.confidence.spread).color}`, color: gradeForPick((leg.fairProb - 0.5) * 100, leg.confidence.n, leg.confidence.spread).color }}>
+              {gradeForPick((leg.fairProb - 0.5) * 100, leg.confidence.n, leg.confidence.spread).letter}
+            </span>
+          )}
+        </div>
         {leg.confidence && (
           <div style={{ fontFamily: mono, fontSize: 10, color: leg.confidence.n === 1 ? COLORS.amber : COLORS.faint }}>{leg.confidence.n} bk{leg.confidence.n > 1 ? "s" : ""}</div>
         )}
@@ -844,6 +877,105 @@ const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }
   );
 });
 
+// Closing Line Value: compares the fair probability at the moment you made
+// a pick against the fair probability the last time that same prop/side was
+// fetched (ideally right before the game). Positive CLV — the market moving
+// toward your side after you picked it — is a lower-variance signal of real
+// edge than win/loss alone, since win/loss is noisy even for a genuinely
+// good process over a small sample.
+const CLVPanel = memo(function CLVPanel({ predictions }) {
+  const [snapshotCache, setSnapshotCache] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const uniqueKeys = useMemo(
+    () => [...new Set(predictions.filter((p) => p.propKey).map((p) => p.propKey))],
+    [predictions]
+  );
+
+  useEffect(() => {
+    (async () => {
+      const missing = uniqueKeys.filter((k) => !(k in snapshotCache));
+      if (missing.length === 0) return;
+      setLoading(true);
+      const updates = {};
+      for (const key of missing) {
+        try {
+          const res = await storage.get(`line-history:${key}`);
+          updates[key] = res ? JSON.parse(res.value) : [];
+        } catch (e) {
+          updates[key] = [];
+        }
+      }
+      setSnapshotCache((prev) => ({ ...prev, ...updates }));
+      setLoading(false);
+    })();
+  }, [uniqueKeys]);
+
+  const rows = useMemo(() => {
+    return predictions
+      .filter((p) => p.propKey)
+      .map((p) => {
+        const snaps = (snapshotCache[p.propKey] || [])
+          .filter((s) => s.side === p.side)
+          .sort((a, b) => a.timestamp - b.timestamp);
+        if (snaps.length < 2) return { ...p, clv: null, closeProb: null };
+        const open = snaps[0].fairProb;
+        const close = snaps[snaps.length - 1].fairProb;
+        return { ...p, clv: (close - open) * 100, closeProb: close };
+      })
+      .sort((a, b) => b.timestamp - a.timestamp);
+  }, [predictions, snapshotCache]);
+
+  const withClv = rows.filter((r) => r.clv !== null);
+  const avgClv = withClv.length ? withClv.reduce((s, r) => s + r.clv, 0) / withClv.length : null;
+  const beatClose = withClv.filter((r) => r.clv > 0).length;
+
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
+      <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 4 }}>CLOSING LINE VALUE</div>
+      <p style={{ color: COLORS.faint, fontSize: 11, margin: "0 0 14px", lineHeight: 1.5 }}>
+        Compares your fair number at pick time to the last fair number recorded for that same prop/side. To get a
+        close value logged, re-fetch or re-add that same prop again closer to game time — right now this only works
+        for props you added via "De-vig from books" or the Live Feed, since manual entries don't have snapshot history.
+      </p>
+
+      {avgClv !== null && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 16 }}>
+          <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
+            <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: mono }}>AVG CLV ({withClv.length} picks)</div>
+            <div style={{ fontSize: 20, fontFamily: mono, marginTop: 4, color: avgClv > 0 ? COLORS.green : COLORS.red }}>
+              {avgClv >= 0 ? "+" : ""}{avgClv.toFixed(1)}pt
+            </div>
+          </div>
+          <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
+            <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: mono }}>BEAT THE CLOSE</div>
+            <div style={{ fontSize: 20, fontFamily: mono, marginTop: 4, color: COLORS.text }}>
+              {beatClose}/{withClv.length} ({((beatClose / withClv.length) * 100).toFixed(0)}%)
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>Loading snapshot history…</p>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto" }}>
+        {rows.map((r) => (
+          <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "7px 10px" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: COLORS.text, fontSize: 12, fontWeight: 600 }}>{r.player} {r.side} {r.line} {r.stat}</div>
+              <div style={{ color: COLORS.faint, fontSize: 10, fontFamily: mono }}>pick: {pct(r.fairProb)}{r.closeProb !== null ? ` · close: ${pct(r.closeProb)}` : ""}</div>
+            </div>
+            <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, flexShrink: 0, marginLeft: 8, color: r.clv === null ? COLORS.faint : r.clv > 0 ? COLORS.green : COLORS.red }}>
+              {r.clv === null ? "no close yet" : `${r.clv >= 0 ? "+" : ""}${r.clv.toFixed(1)}pt`}
+            </div>
+          </div>
+        ))}
+        {rows.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No trackable picks yet.</p>}
+      </div>
+    </div>
+  );
+});
+
 export default function EdgeBoard() {
   const [legs, setLegs] = useState([]);
   const [entryType, setEntryType] = useState("power");
@@ -885,6 +1017,7 @@ export default function EdgeBoard() {
       const next = [...prev, {
         id: leg.id, player: leg.name, stat: leg.stat, line: leg.line, side: leg.side,
         matchup: leg.matchup, fairProb: leg.fairProb, timestamp: Date.now(), result: null,
+        propKey: slugify(`${leg.name}-${leg.stat}`),
       }];
       storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
       return next;
@@ -1091,6 +1224,8 @@ export default function EdgeBoard() {
         )}
 
         <CalibrationPanel predictions={predictions} onGrade={gradePrediction} />
+
+        <CLVPanel predictions={predictions} />
 
         <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 12 }}>
