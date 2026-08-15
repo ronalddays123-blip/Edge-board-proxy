@@ -337,19 +337,49 @@ function buildPPComparison(rows) {
       return pp && (pp.over || pp.under);
     });
     if (!ppRow) return;
+    const ppLine = Number(ppRow.line);
+    if (isNaN(ppLine)) return;
 
     const sharpCandidates = group.lines
-      .map((r) => ({ row: r, result: computeFairFromBooks(r.books, "Over") }))
-      .filter((c) => c.result && c.result.n >= 1);
+      .map((r) => ({ line: Number(r.line), result: computeFairFromBooks(r.books, "Over") }))
+      .filter((c) => c.result && c.result.n >= 1 && !isNaN(c.line))
+      .sort((a, b) => a.line - b.line);
     if (sharpCandidates.length === 0) return;
 
-    const ref = sharpCandidates.sort((a, b) => (b.result.n || 0) - (a.result.n || 0))[0];
-    const sameLine = Number(ref.row.line) === Number(ppRow.line);
+    // exact match — best case, no approximation needed
+    const exact = sharpCandidates.find((c) => c.line === ppLine);
+    if (exact) {
+      out.push({
+        player: group.player, stat: group.stat, matchup: group.matchup, ppLine,
+        sharpLine: `${exact.line}`, method: "exact",
+        sharpFairOver: exact.result.fairProb, sharpN: exact.result.n,
+      });
+      return;
+    }
 
+    // no exact match — if a sharp line exists on both sides of PP's number,
+    // linearly interpolate between them for a closer estimate at PP's exact
+    // threshold, rather than settling for whichever single line is nearest
+    const below = [...sharpCandidates].reverse().find((c) => c.line < ppLine);
+    const above = sharpCandidates.find((c) => c.line > ppLine);
+
+    if (below && above) {
+      const weight = (ppLine - below.line) / (above.line - below.line);
+      const interpFair = below.result.fairProb + (above.result.fairProb - below.result.fairProb) * weight;
+      out.push({
+        player: group.player, stat: group.stat, matchup: group.matchup, ppLine,
+        sharpLine: `${below.line}–${above.line}`, method: "interpolated",
+        sharpFairOver: interpFair, sharpN: Math.min(below.result.n, above.result.n),
+      });
+      return;
+    }
+
+    // only lines on one side exist — fall back to the single nearest one
+    const nearest = [...sharpCandidates].sort((a, b) => Math.abs(a.line - ppLine) - Math.abs(b.line - ppLine))[0];
     out.push({
-      player: group.player, stat: group.stat, matchup: group.matchup,
-      ppLine: ppRow.line, sharpLine: ref.row.line, sameLine,
-      sharpFairOver: ref.result.fairProb, sharpN: ref.result.n,
+      player: group.player, stat: group.stat, matchup: group.matchup, ppLine,
+      sharpLine: `${nearest.line}`, method: "nearest", distance: Math.abs(nearest.line - ppLine),
+      sharpFairOver: nearest.result.fairProb, sharpN: nearest.result.n,
     });
   });
   return out;
@@ -629,20 +659,36 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
                   <div key={i} style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
                     <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{c.player} — {c.stat}</div>
                     <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono, marginBottom: 4 }}>{c.matchup}</div>
-                    {c.sameLine ? (
+
+                    {c.method === "exact" && (
                       <div style={{ fontFamily: mono, fontSize: 12 }}>
-                        <span style={{ color: COLORS.text }}>PP line matches sharp line: {c.ppLine}</span>{" "}
+                        <span style={{ color: COLORS.green }}>EXACT MATCH</span>{" "}
+                        <span style={{ color: COLORS.text }}>PP {c.ppLine} = sharp {c.sharpLine}</span>{" "}
                         <span style={{ color: c.sharpFairOver > 0.5 ? COLORS.green : COLORS.red }}>
                           · Over fair {pct(c.sharpFairOver)} ({c.sharpN} bk{c.sharpN > 1 ? "s" : ""})
                         </span>
                       </div>
-                    ) : (
+                    )}
+
+                    {c.method === "interpolated" && (
                       <div style={{ fontFamily: mono, fontSize: 12 }}>
-                        <span style={{ color: COLORS.amber }}>PP: {c.ppLine} vs sharp: {c.sharpLine}</span>{" "}
+                        <span style={{ color: COLORS.amber }}>INTERPOLATED</span>{" "}
+                        <span style={{ color: COLORS.text }}>PP {c.ppLine} sits between sharp lines {c.sharpLine}</span>{" "}
+                        <span style={{ color: c.sharpFairOver > 0.5 ? COLORS.green : COLORS.red }}>
+                          · est. Over fair {pct(c.sharpFairOver)}
+                        </span>
+                        <div style={{ color: COLORS.faint, fontSize: 10, marginTop: 2 }}>
+                          Estimated by straight-line interpolation between the two nearest sharp lines — treat as a rough estimate, not a precise price.
+                        </div>
+                      </div>
+                    )}
+
+                    {c.method === "nearest" && (
+                      <div style={{ fontFamily: mono, fontSize: 12 }}>
+                        <span style={{ color: COLORS.red }}>NEAREST ONLY ({c.distance} pt away)</span>{" "}
+                        <span style={{ color: COLORS.text }}>PP {c.ppLine} vs closest sharp {c.sharpLine}</span>{" "}
                         <span style={{ color: COLORS.faint }}>
-                          — different thresholds, can't give an exact number. {Number(c.ppLine) < Number(c.sharpLine)
-                            ? "PP set lower, so Over is directionally easier there than at the sharp line."
-                            : "PP set higher, so Under is directionally easier there than at the sharp line."}
+                          — no sharp line on the other side to interpolate with, so this gap is a rough directional read only, not a real number.
                         </span>
                       </div>
                     )}
