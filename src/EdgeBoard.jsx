@@ -2,6 +2,24 @@ import React, { useState, useMemo, useEffect, useCallback, memo } from "react";
 import { TrendingUp, TrendingDown, Plus, Activity, Trash2, History, AlertCircle, Radio, RefreshCw } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
+// Real, working persistence for the deployed site — localStorage, not
+// window.storage (that API only exists inside Claude.ai's artifact preview
+// and was silently doing nothing on the actual deployed domain). Mirrors the
+// same get/set contract so the try/catch logic throughout this file needs no
+// other changes: get() throws on a missing key, same as before.
+const storage = {
+  get: async (key) => {
+    const raw = localStorage.getItem(key);
+    if (raw === null) throw new Error("not found: " + key);
+    return { key, value: raw };
+  },
+  set: async (key, value) => {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+
 // NOTE ON LIVE FETCHING: this only works when Edge Board itself is deployed
 // as a real site (e.g. alongside your proxy on Vercel). Inside the Claude.ai
 // artifact preview, network calls are sandboxed to Anthropic's own API, so
@@ -334,7 +352,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   useEffect(() => {
     (async () => {
       try {
-        const res = await window.storage.get("proxy-url");
+        const res = await storage.get("proxy-url");
         if (res?.value) setProxyUrl(res.value);
       } catch (e) { /* no saved url yet */ }
     })();
@@ -342,7 +360,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
 
   const saveUrl = (val) => {
     setProxyUrl(val);
-    window.storage.set("proxy-url", val).catch(() => {});
+    storage.set("proxy-url", val).catch(() => {});
   };
 
   const fetchLive = async () => {
@@ -845,7 +863,7 @@ export default function EdgeBoard() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await window.storage.get("predictions-log");
+        const res = await storage.get("predictions-log");
         setPredictions(res ? JSON.parse(res.value) : []);
       } catch (e) {
         setPredictions([]);
@@ -856,7 +874,7 @@ export default function EdgeBoard() {
   const savePredictions = useCallback(async (next) => {
     setPredictions(next);
     try {
-      await window.storage.set("predictions-log", JSON.stringify(next));
+      await storage.set("predictions-log", JSON.stringify(next));
     } catch (e) {
       console.error("storage error", e);
     }
@@ -868,7 +886,7 @@ export default function EdgeBoard() {
         id: leg.id, player: leg.name, stat: leg.stat, line: leg.line, side: leg.side,
         matchup: leg.matchup, fairProb: leg.fairProb, timestamp: Date.now(), result: null,
       }];
-      window.storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
+      storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
       return next;
     });
   }, []);
@@ -876,7 +894,7 @@ export default function EdgeBoard() {
   const gradePrediction = useCallback((id, result) => {
     setPredictions((prev) => {
       const next = prev.map((p) => (p.id === id ? { ...p, result } : p));
-      window.storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
+      storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
       return next;
     });
   }, []);
@@ -884,7 +902,7 @@ export default function EdgeBoard() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await window.storage.get("line-index");
+        const res = await storage.get("line-index");
         setHistoryIndex(res ? JSON.parse(res.value) : []);
       } catch (e) {
         setHistoryIndex([]);
@@ -897,15 +915,15 @@ export default function EdgeBoard() {
     try {
       let arr = [];
       try {
-        const res = await window.storage.get(`line-history:${slug}`);
+        const res = await storage.get(`line-history:${slug}`);
         arr = res ? JSON.parse(res.value) : [];
       } catch (e) { arr = []; }
       arr.push(snapshot);
-      await window.storage.set(`line-history:${slug}`, JSON.stringify(arr));
+      await storage.set(`line-history:${slug}`, JSON.stringify(arr));
       setHistoryIndex((prev) => {
         if (prev.find((i) => i.slug === slug)) return prev;
         const next = [...prev, { slug, name: propName }];
-        window.storage.set("line-index", JSON.stringify(next)).catch(() => {});
+        storage.set("line-index", JSON.stringify(next)).catch(() => {});
         return next;
       });
     } catch (e) {
@@ -917,7 +935,7 @@ export default function EdgeBoard() {
     setSelectedHistoryProp(slug);
     setHistoryLoading(true);
     try {
-      const res = await window.storage.get(`line-history:${slug}`);
+      const res = await storage.get(`line-history:${slug}`);
       setHistoryData(res ? JSON.parse(res.value) : []);
     } catch (e) {
       setHistoryData([]);
