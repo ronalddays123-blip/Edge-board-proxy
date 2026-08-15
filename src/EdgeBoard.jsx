@@ -844,6 +844,105 @@ const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }
   );
 });
 
+// Closing Line Value: compares the fair probability at the moment you made
+// a pick against the fair probability the last time that same prop/side was
+// fetched (ideally right before the game). Positive CLV — the market moving
+// toward your side after you picked it — is a lower-variance signal of real
+// edge than win/loss alone, since win/loss is noisy even for a genuinely
+// good process over a small sample.
+const CLVPanel = memo(function CLVPanel({ predictions }) {
+  const [snapshotCache, setSnapshotCache] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const uniqueKeys = useMemo(
+    () => [...new Set(predictions.filter((p) => p.propKey).map((p) => p.propKey))],
+    [predictions]
+  );
+
+  useEffect(() => {
+    (async () => {
+      const missing = uniqueKeys.filter((k) => !(k in snapshotCache));
+      if (missing.length === 0) return;
+      setLoading(true);
+      const updates = {};
+      for (const key of missing) {
+        try {
+          const res = await storage.get(`line-history:${key}`);
+          updates[key] = res ? JSON.parse(res.value) : [];
+        } catch (e) {
+          updates[key] = [];
+        }
+      }
+      setSnapshotCache((prev) => ({ ...prev, ...updates }));
+      setLoading(false);
+    })();
+  }, [uniqueKeys]);
+
+  const rows = useMemo(() => {
+    return predictions
+      .filter((p) => p.propKey)
+      .map((p) => {
+        const snaps = (snapshotCache[p.propKey] || [])
+          .filter((s) => s.side === p.side)
+          .sort((a, b) => a.timestamp - b.timestamp);
+        if (snaps.length < 2) return { ...p, clv: null, closeProb: null };
+        const open = snaps[0].fairProb;
+        const close = snaps[snaps.length - 1].fairProb;
+        return { ...p, clv: (close - open) * 100, closeProb: close };
+      })
+      .sort((a, b) => b.timestamp - a.timestamp);
+  }, [predictions, snapshotCache]);
+
+  const withClv = rows.filter((r) => r.clv !== null);
+  const avgClv = withClv.length ? withClv.reduce((s, r) => s + r.clv, 0) / withClv.length : null;
+  const beatClose = withClv.filter((r) => r.clv > 0).length;
+
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
+      <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 4 }}>CLOSING LINE VALUE</div>
+      <p style={{ color: COLORS.faint, fontSize: 11, margin: "0 0 14px", lineHeight: 1.5 }}>
+        Compares your fair number at pick time to the last fair number recorded for that same prop/side. To get a
+        close value logged, re-fetch or re-add that same prop again closer to game time — right now this only works
+        for props you added via "De-vig from books" or the Live Feed, since manual entries don't have snapshot history.
+      </p>
+
+      {avgClv !== null && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 16 }}>
+          <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
+            <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: mono }}>AVG CLV ({withClv.length} picks)</div>
+            <div style={{ fontSize: 20, fontFamily: mono, marginTop: 4, color: avgClv > 0 ? COLORS.green : COLORS.red }}>
+              {avgClv >= 0 ? "+" : ""}{avgClv.toFixed(1)}pt
+            </div>
+          </div>
+          <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
+            <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: mono }}>BEAT THE CLOSE</div>
+            <div style={{ fontSize: 20, fontFamily: mono, marginTop: 4, color: COLORS.text }}>
+              {beatClose}/{withClv.length} ({((beatClose / withClv.length) * 100).toFixed(0)}%)
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>Loading snapshot history…</p>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto" }}>
+        {rows.map((r) => (
+          <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "7px 10px" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: COLORS.text, fontSize: 12, fontWeight: 600 }}>{r.player} {r.side} {r.line} {r.stat}</div>
+              <div style={{ color: COLORS.faint, fontSize: 10, fontFamily: mono }}>pick: {pct(r.fairProb)}{r.closeProb !== null ? ` · close: ${pct(r.closeProb)}` : ""}</div>
+            </div>
+            <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, flexShrink: 0, marginLeft: 8, color: r.clv === null ? COLORS.faint : r.clv > 0 ? COLORS.green : COLORS.red }}>
+              {r.clv === null ? "no close yet" : `${r.clv >= 0 ? "+" : ""}${r.clv.toFixed(1)}pt`}
+            </div>
+          </div>
+        ))}
+        {rows.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No trackable picks yet.</p>}
+      </div>
+    </div>
+  );
+});
+
 export default function EdgeBoard() {
   const [legs, setLegs] = useState([]);
   const [entryType, setEntryType] = useState("power");
@@ -885,6 +984,7 @@ export default function EdgeBoard() {
       const next = [...prev, {
         id: leg.id, player: leg.name, stat: leg.stat, line: leg.line, side: leg.side,
         matchup: leg.matchup, fairProb: leg.fairProb, timestamp: Date.now(), result: null,
+        propKey: slugify(`${leg.name}-${leg.stat}`),
       }];
       storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
       return next;
@@ -1091,6 +1191,8 @@ export default function EdgeBoard() {
         )}
 
         <CalibrationPanel predictions={predictions} onGrade={gradePrediction} />
+
+        <CLVPanel predictions={predictions} />
 
         <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 12 }}>
