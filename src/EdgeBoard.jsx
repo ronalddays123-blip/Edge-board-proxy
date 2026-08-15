@@ -355,6 +355,82 @@ function buildPPComparison(rows) {
   return out;
 }
 
+// Greedy-builds a slip for each size 2-6: sorts candidates by fair
+// probability, takes the strongest leg from each distinct matchup (never two
+// legs from the same game, so legs stay independent and the combined math
+// stays honest rather than silently overstating win odds via hidden
+// correlation). Since multiplier is fixed for a given size, maximizing win
+// probability for that size IS maximizing EV for that size — the real
+// tradeoff is between sizes, which is what this surfaces instead of hiding.
+function buildAutoSlips(ranked, maxSize = 6) {
+  const sorted = [...ranked].sort((a, b) => b.bestFairProb - a.bestFairProb);
+  const results = [];
+  for (let size = 2; size <= maxSize; size++) {
+    const chosen = [];
+    const usedMatchups = new Set();
+    for (const cand of sorted) {
+      if (chosen.length >= size) break;
+      if (usedMatchups.has(cand.matchup)) continue;
+      chosen.push(cand);
+      usedMatchups.add(cand.matchup);
+    }
+    if (chosen.length < size) {
+      results.push({ size, insufficientGames: true });
+      continue;
+    }
+    const combinedProb = chosen.reduce((p, c) => p * c.bestFairProb, 1);
+    const mult = DEFAULT_POWER[size] || 0;
+    const ev = mult ? combinedProb * mult - 1 : null;
+    const breakeven = mult ? 1 / mult : null;
+    results.push({ size, legs: chosen, combinedProb, mult, ev, breakeven });
+  }
+  return results;
+}
+
+const AutoSlipBuilder = memo(function AutoSlipBuilder({ ranked, onBuild }) {
+  const slips = useMemo(() => buildAutoSlips(ranked), [ranked]);
+  const valid = slips.filter((s) => !s.insufficientGames);
+  const bestByEV = valid.length ? valid.reduce((a, b) => (b.ev > a.ev ? b : a)) : null;
+
+  return (
+    <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.line}` }}>
+      <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 6 }}>AUTO SLIP BUILDER</div>
+      <p style={{ color: COLORS.faint, fontSize: 11, margin: "0 0 12px", lineHeight: 1.5 }}>
+        One leg per game max, picked by highest fair probability, so nothing here silently doubles up on the same
+        outcome. Win rate and EV are shown separately on purpose — smaller slips win more often but pay less; bigger
+        slips pay more but win less. The green-bordered one is the highest EV, not necessarily the highest win rate.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {slips.map((s) => (
+          <div key={s.size} style={{ background: COLORS.bg, border: `1px solid ${bestByEV && s.size === bestByEV.size ? COLORS.green : COLORS.line}`, borderRadius: 6, padding: "10px 12px" }}>
+            {s.insufficientGames ? (
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.faint }}>{s.size}-pick: not enough distinct games in current results</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontFamily: mono, fontSize: 13, color: COLORS.text, fontWeight: 700 }}>
+                    {s.size}-pick {bestByEV && s.size === bestByEV.size ? "· BEST EV" : ""}
+                  </span>
+                  <button onClick={() => onBuild(s.legs)} style={{ fontFamily: mono, fontSize: 11, padding: "5px 10px", borderRadius: 5, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer" }}>Build this slip</button>
+                </div>
+                <div style={{ display: "flex", gap: 14, fontFamily: mono, fontSize: 11, flexWrap: "wrap" }}>
+                  <span style={{ color: COLORS.text }}>Win: {pct(s.combinedProb)}</span>
+                  <span style={{ color: COLORS.faint }}>Breakeven: {pct(s.breakeven)}</span>
+                  <span style={{ color: s.ev > 0 ? COLORS.green : COLORS.red }}>EV: {s.ev >= 0 ? "+" : ""}{(s.ev * 100).toFixed(1)}%</span>
+                  <span style={{ color: COLORS.faint }}>{s.mult}x payout</span>
+                </div>
+                <div style={{ color: COLORS.faint, fontSize: 10, marginTop: 4 }}>
+                  {s.legs.map((l) => `${l.player} ${l.bestSide} ${l.line}`).join(" · ")}
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
 const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   const [proxyUrl, setProxyUrl] = useState("");
   const [sport, setSport] = useState("basketball_wnba");
@@ -538,6 +614,10 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
             ))}
             {ranked.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>Nothing clears your filters yet — try lowering min books or min edge.</p>}
           </div>
+
+          {ranked.length >= 2 && (
+            <AutoSlipBuilder ranked={ranked} onBuild={(legs) => legs.forEach((l) => addFromRow(l, l.bestSide))} />
+          )}
 
           <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.line}` }}>
             <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 8 }}>PRIZEPICKS VS SHARP MARKET</div>
