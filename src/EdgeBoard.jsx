@@ -59,8 +59,9 @@ function parseLiveOdds(json) {
           const player = oc.description || "Unknown player";
           const line = oc.point;
           const id = `${player}|${stat}|${line}|${matchup}`;
-          if (!rows[id]) rows[id] = { player, stat, line, matchup, books: emptyBooks() };
+          if (!rows[id]) rows[id] = { player, stat, line, matchup, startTime: ev.commence_time, books: emptyBooks() };
           rows[id].books[bookKey][side.toLowerCase()] = oc.price;
+          rows[id].books[bookKey].lastUpdate = mkt.last_update || bm.last_update || null;
         });
       });
     });
@@ -214,7 +215,7 @@ const BOOKS = [
   { key: "FanDuel", short: "FD", color: "#3E9CFF" },
 ];
 const SHORT_TO_KEY = Object.fromEntries(BOOKS.map((b) => [b.short, b.key]));
-const emptyBooks = () => Object.fromEntries(BOOKS.map((b) => [b.key, { over: "", under: "" }]));
+const emptyBooks = () => Object.fromEntries(BOOKS.map((b) => [b.key, { over: "", under: "", lastUpdate: null }]));
 const STAT_PRESETS = ["Points", "Rebounds", "Assists", "PRA", "3PT Made", "Steals", "Blocks"];
 
 // Combines fair probabilities across books, weighting lower-hold (tighter) lines
@@ -226,7 +227,7 @@ function computeFairFromBooks(books, side) {
     const b = books[key];
     if (b && b.over && b.under) {
       const nv = powerDevig(b.over, b.under);
-      if (nv) rows.push({ fair: side === "Over" ? nv.overFair : nv.underFair, hold: Math.max(nv.hold, 0.001) });
+      if (nv) rows.push({ fair: side === "Over" ? nv.overFair : nv.underFair, hold: Math.max(nv.hold, 0.001), lastUpdate: b.lastUpdate });
     }
   });
   if (rows.length === 0) return null;
@@ -234,7 +235,33 @@ function computeFairFromBooks(books, side) {
   const totalW = weights.reduce((a, c) => a + c, 0);
   const fairProb = rows.reduce((sum, r, i) => sum + r.fair * weights[i], 0) / totalW;
   const spread = rows.length > 1 ? Math.max(...rows.map((r) => r.fair)) - Math.min(...rows.map((r) => r.fair)) : 0;
-  return { fairProb, n: rows.length, spread };
+  // oldest (stalest) timestamp among the books actually used — the weak link
+  const timestamps = rows.map((r) => r.lastUpdate).filter(Boolean).map((t) => new Date(t).getTime());
+  const oldestUpdate = timestamps.length ? Math.min(...timestamps) : null;
+  return { fairProb, n: rows.length, spread, oldestUpdate };
+}
+
+// Formats a timestamp's age as short, color-coded text — green under a
+// minute, amber under 10, red beyond that (a price that old may no longer
+// reflect where the market actually is).
+function formatAge(ms) {
+  if (!ms) return null;
+  const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  let text;
+  if (seconds < 60) text = `${seconds}s ago`;
+  else if (seconds < 3600) text = `${Math.floor(seconds / 60)}m ago`;
+  else text = `${Math.floor(seconds / 3600)}h ago`;
+  const color = seconds < 60 ? COLORS.green : seconds < 600 ? COLORS.amber : COLORS.red;
+  return { text, color };
+}
+
+function formatGameTime(iso) {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  } catch (e) {
+    return null;
+  }
 }
 
 function parseQuickPaste(text) {
@@ -584,7 +611,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
         if (!best.fairProb) return null;
         const edgePts = (best.fairProb - 0.5) * 100;
         const grade = gradeForPick(edgePts, best.n, best.spread);
-        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade };
+        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade, oldestUpdate: best.oldestUpdate };
       })
       .filter(Boolean)
       .filter((r) => r.n >= minBooks && r.edgePts >= minEdge)
@@ -596,8 +623,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
     if (!result) return;
     onQuickAdd({
       id: Date.now(), name: row.player, matchup: row.matchup, stat: row.stat, line: row.line, side,
-      group: null, fairProb: result.fairProb, fairOdds: probToAmerican(result.fairProb),
-      books: row.books, include: true, confidence: { n: result.n, spread: result.spread },
+      group: null, fairProb: result.fairProb, fairOdds: probToAmerican(result.fairProb), startTime: row.startTime,
+      books: row.books, include: true, confidence: { n: result.n, spread: result.spread, oldestUpdate: result.oldestUpdate },
     }, { propName: `${row.player}-${row.stat}`, snapshot: { timestamp: Date.now(), side, fairProb: result.fairProb, line: row.line, stat: row.stat } });
   };
 
@@ -705,11 +732,16 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{row.player} — {row.stat} {row.line}</div>
-                  <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>{row.matchup}</div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 3, fontFamily: mono, fontSize: 11 }}>
+                  <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>
+                    {row.matchup}{formatGameTime(row.startTime) ? ` · ${formatGameTime(row.startTime)}` : ""}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 3, fontFamily: mono, fontSize: 11, flexWrap: "wrap" }}>
                     <span style={{ color: COLORS.green, fontWeight: 700 }}>{row.bestSide} favored · {pct(row.bestFairProb)}</span>
                     <span style={{ color: COLORS.amber }}>+{row.edgePts.toFixed(1)}pt edge</span>
                     <span style={{ color: row.n === 1 ? COLORS.amber : COLORS.faint }}>{row.n} bk{row.n > 1 ? "s" : ""}</span>
+                    {formatAge(row.oldestUpdate) && (
+                      <span style={{ color: formatAge(row.oldestUpdate).color }}>· {formatAge(row.oldestUpdate).text}</span>
+                    )}
                   </div>
                 </div>
                 <button onClick={() => addFromRow(row, row.bestSide)} style={{ fontFamily: mono, fontSize: 11, padding: "6px 10px", borderRadius: 5, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer", flexShrink: 0, marginLeft: 8 }}>+ Add {row.bestSide}</button>
@@ -794,6 +826,8 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
   const [mode, setMode] = useState("books");
   const [error, setError] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [startTime, setStartTime] = useState(null);
 
   const preview = useMemo(() => (mode === "books" ? computeFairFromBooks(bookInputs, side) : null), [bookInputs, side, mode]);
 
@@ -817,6 +851,7 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
     setLineVal(row.line);
     setSide(favoredSide);
     setBookInputs(JSON.parse(JSON.stringify(row.books)));
+    setStartTime(row.startTime || null);
     setShowSuggestions(false);
   };
 
@@ -850,23 +885,35 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
     }
 
     onAdd(
-      { id: Date.now(), name, matchup, stat, line: lineVal, side, group: group.trim() || null,
+      { id: Date.now(), name, matchup, stat, line: lineVal, side, group: group.trim() || null, startTime,
         fairProb, fairOdds: probToAmerican(fairProb), books: booksSnapshot, include: true,
-        confidence: meta ? { n: meta.n, spread: meta.spread } : null },
+        confidence: meta ? { n: meta.n, spread: meta.spread, oldestUpdate: meta.oldestUpdate } : null },
       mode === "books" ? { propName: `${name}-${stat}`, snapshot: { timestamp: Date.now(), side, fairProb, line: lineVal, stat } } : null
     );
 
-    setName(""); setLineVal(""); setBookInputs(emptyBooks()); setQuickPaste(""); setManualProb("");
+    setName(""); setLineVal(""); setBookInputs(emptyBooks()); setQuickPaste(""); setManualProb(""); setStartTime(null);
   };
 
   const handleKeyDown = (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } };
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }} onKeyDown={handleKeyDown}>
-      <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
-        <button onClick={() => setMode("books")} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: sans, fontSize: 12, letterSpacing: "0.05em", textTransform: "uppercase", paddingBottom: 6, color: mode === "books" ? COLORS.text : COLORS.faint, borderBottom: mode === "books" ? `2px solid ${COLORS.green}` : "2px solid transparent" }}>De-vig from books</button>
-        <button onClick={() => setMode("manual")} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: sans, fontSize: 12, letterSpacing: "0.05em", textTransform: "uppercase", paddingBottom: 6, color: mode === "manual" ? COLORS.text : COLORS.faint, borderBottom: mode === "manual" ? `2px solid ${COLORS.green}` : "2px solid transparent" }}>Enter fair % manually</button>
-      </div>
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "none", border: "none", cursor: "pointer", padding: 0, marginBottom: expanded ? 14 : 0 }}
+      >
+        <span style={{ fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em" }}>
+          MANUAL ENTRY <span style={{ color: COLORS.faint, fontWeight: 400 }}>· for props outside the live fetch</span>
+        </span>
+        <span style={{ color: COLORS.green, fontFamily: mono, fontSize: 12 }}>{expanded ? "− collapse" : "+ expand"}</span>
+      </button>
+
+      {expanded && (
+        <>
+          <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+            <button onClick={() => setMode("books")} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: sans, fontSize: 12, letterSpacing: "0.05em", textTransform: "uppercase", paddingBottom: 6, color: mode === "books" ? COLORS.text : COLORS.faint, borderBottom: mode === "books" ? `2px solid ${COLORS.green}` : "2px solid transparent" }}>De-vig from books</button>
+            <button onClick={() => setMode("manual")} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: sans, fontSize: 12, letterSpacing: "0.05em", textTransform: "uppercase", paddingBottom: 6, color: mode === "manual" ? COLORS.text : COLORS.faint, borderBottom: mode === "manual" ? `2px solid ${COLORS.green}` : "2px solid transparent" }}>Enter fair % manually</button>
+          </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
         <Field label="Player / Team">
@@ -964,6 +1011,8 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
       <button onClick={submit} style={{ display: "flex", alignItems: "center", gap: 6, background: COLORS.green, color: "#04140D", border: "none", borderRadius: 6, padding: "9px 14px", fontFamily: sans, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
         <Plus size={15} /> Add to board <span style={{ opacity: 0.6, fontWeight: 400 }}>(Enter)</span>
       </button>
+        </>
+      )}
     </div>
   );
 });
@@ -977,7 +1026,9 @@ const BoardRow = memo(function BoardRow({ leg, onToggle, onRemove }) {
       </td>
       <td style={{ padding: "10px 10px 10px 0" }}>
         <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{leg.name}</div>
-        <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>{leg.matchup}{leg.group ? ` · grp: ${leg.group}` : ""}</div>
+        <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono }}>
+          {leg.matchup}{leg.group ? ` · grp: ${leg.group}` : ""}{formatGameTime(leg.startTime) ? ` · ${formatGameTime(leg.startTime)}` : ""}
+        </div>
       </td>
       <td style={{ padding: "10px 10px 10px 0" }}>
         <div style={{ display: "inline-block", background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 5, padding: "3px 8px", fontFamily: mono, fontSize: 12, color: COLORS.text, fontWeight: 600 }}>{leg.side} {leg.line}</div>
@@ -992,9 +1043,14 @@ const BoardRow = memo(function BoardRow({ leg, onToggle, onRemove }) {
             </span>
           )}
         </div>
-        {leg.confidence && (
-          <div style={{ fontFamily: mono, fontSize: 10, color: leg.confidence.n === 1 ? COLORS.amber : COLORS.faint }}>{leg.confidence.n} bk{leg.confidence.n > 1 ? "s" : ""}</div>
-        )}
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          {leg.confidence && (
+            <span style={{ fontFamily: mono, fontSize: 10, color: leg.confidence.n === 1 ? COLORS.amber : COLORS.faint }}>{leg.confidence.n} bk{leg.confidence.n > 1 ? "s" : ""}</span>
+          )}
+          {leg.confidence && formatAge(leg.confidence.oldestUpdate) && (
+            <span style={{ fontFamily: mono, fontSize: 10, color: formatAge(leg.confidence.oldestUpdate).color }}>· {formatAge(leg.confidence.oldestUpdate).text}</span>
+          )}
+        </div>
       </td>
       <td style={{ padding: "10px 10px 10px 0", fontFamily: mono, fontSize: 13, color: COLORS.text }}>{oddsFmt(leg.fairOdds) || "—"}</td>
       {BOOKS.map((b) => {
@@ -1349,12 +1405,29 @@ export default function EdgeBoard() {
     return Object.keys(counts).filter((g) => counts[g] >= 2);
   }, [includedLegs]);
 
-  const useMonteCarlo = activeGroups.some((g) => (groupCorr[g] ?? 0.3) !== 0);
+  // Heuristic starting point, not measured correlation — real correlation
+  // needs historical box scores this app doesn't have. Same player across
+  // different stats (points+rebounds) tends to move together more than two
+  // different players in the same game do, so that's reflected in the
+  // default; still just a starting guess, and the slider still overrides it.
+  const groupDefaults = useMemo(() => {
+    const defaults = {};
+    activeGroups.forEach((g) => {
+      const legsInGroup = includedLegs.filter((l) => l.group === g);
+      const names = new Set(legsInGroup.map((l) => l.name.toLowerCase()));
+      defaults[g] = names.size === 1 ? 0.45 : 0.2;
+    });
+    return defaults;
+  }, [activeGroups, includedLegs]);
+
+  const effectiveGroupCorr = useMemo(() => ({ ...groupDefaults, ...groupCorr }), [groupDefaults, groupCorr]);
+
+  const useMonteCarlo = activeGroups.some((g) => (effectiveGroupCorr[g] ?? 0.3) !== 0);
 
   const { ev, winProb } = useMemo(() => {
     if (n === 0) return { ev: 0, winProb: 0 };
-    return useMonteCarlo ? slipEVCorrelated(includedLegs, payoutTable, groupCorr) : slipEVExact(includedLegs, payoutTable);
-  }, [includedLegs, payoutTable, entryType, useMonteCarlo, groupCorr]);
+    return useMonteCarlo ? slipEVCorrelated(includedLegs, payoutTable, effectiveGroupCorr) : slipEVExact(includedLegs, payoutTable);
+  }, [includedLegs, payoutTable, entryType, useMonteCarlo, effectiveGroupCorr]);
 
   const topMult = entryType === "power" ? multipliers[n] : payoutTable[n];
   const breakeven = topMult ? 1 / topMult : null;
@@ -1415,16 +1488,25 @@ export default function EdgeBoard() {
           <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.amber}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
             <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.amber, letterSpacing: "0.06em", marginBottom: 10 }}>CORRELATION GROUPS DETECTED</div>
             <p style={{ color: COLORS.muted, fontSize: 12, marginTop: 0, marginBottom: 12 }}>
-              These legs share a game/player tag. Set the average pairwise correlation — the EV below then runs a Monte Carlo simulation instead of assuming independence.
+              These legs share a game/player tag. Starting values are auto-suggested (higher for same-player legs, lower for different players in the same game) — still a heuristic, not measured data, so adjust freely.
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {activeGroups.map((g) => (
-                <div key={g} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, width: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g}</span>
-                  <input type="range" min="-0.9" max="0.9" step="0.05" value={groupCorr[g] ?? 0.3} onChange={(e) => setGroupCorr({ ...groupCorr, [g]: Number(e.target.value) })} style={{ flex: 1 }} />
-                  <span style={{ fontFamily: mono, fontSize: 13, color: COLORS.amber, width: 44, textAlign: "right" }}>{(groupCorr[g] ?? 0.3).toFixed(2)}</span>
-                </div>
-              ))}
+              {activeGroups.map((g) => {
+                const isCustom = g in groupCorr;
+                const value = effectiveGroupCorr[g] ?? 0.3;
+                return (
+                  <div key={g}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, width: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g}</span>
+                      <input type="range" min="-0.9" max="0.9" step="0.05" value={value} onChange={(e) => setGroupCorr({ ...groupCorr, [g]: Number(e.target.value) })} style={{ flex: 1 }} />
+                      <span style={{ fontFamily: mono, fontSize: 13, color: COLORS.amber, width: 44, textAlign: "right" }}>{value.toFixed(2)}</span>
+                    </div>
+                    <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.faint, marginLeft: 192 }}>
+                      {isCustom ? "manually set" : `auto-suggested (${groupDefaults[g] === 0.45 ? "same player" : "different players"})`}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
