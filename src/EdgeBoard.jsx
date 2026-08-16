@@ -221,8 +221,20 @@ const STAT_PRESETS = ["Points", "Rebounds", "Assists", "PRA", "3PT Made", "Steal
 // Combines fair probabilities across books, weighting lower-hold (tighter) lines
 // more heavily since a tighter two-sided price is generally a more trustworthy
 // signal than a book quoting a wide, loose market on the same prop.
+// Older quotes count for less. A price under a minute old gets full weight;
+// it decays linearly down to a floor of 0.3 by 15 minutes old. Never zero —
+// an old quote is still weak evidence, just weaker, and zeroing it out
+// entirely could break the calc if every book happens to be stale at once.
+function freshnessWeight(lastUpdate) {
+  if (!lastUpdate) return 0.7; // unknown age — treat as moderately trustworthy
+  const ageSec = (Date.now() - new Date(lastUpdate).getTime()) / 1000;
+  if (ageSec <= 60) return 1;
+  if (ageSec >= 900) return 0.3;
+  return 1 - ((ageSec - 60) / (900 - 60)) * 0.7;
+}
+
 function computeFairFromBooks(books, side) {
-  const rows = [];
+  let rows = [];
   BOOKS.forEach(({ key }) => {
     const b = books[key];
     if (b && b.over && b.under) {
@@ -231,14 +243,30 @@ function computeFairFromBooks(books, side) {
     }
   });
   if (rows.length === 0) return null;
-  const weights = rows.map((r) => 1 / r.hold);
+
+  // Outlier rejection: only meaningful with 3+ books (with 2, "outlier" vs
+  // "disagreement" isn't distinguishable), and never rejects down below 2
+  // remaining — a book that's merely different isn't necessarily wrong, but
+  // one that's wildly off the rest shouldn't quietly drag the average.
+  let excludedCount = 0;
+  if (rows.length >= 3) {
+    const sortedFair = [...rows.map((r) => r.fair)].sort((a, b) => a - b);
+    const mid = Math.floor(sortedFair.length / 2);
+    const median = sortedFair.length % 2 ? sortedFair[mid] : (sortedFair[mid - 1] + sortedFair[mid]) / 2;
+    const kept = rows.filter((r) => Math.abs(r.fair - median) <= 0.08);
+    if (kept.length >= 2) {
+      excludedCount = rows.length - kept.length;
+      rows = kept;
+    }
+  }
+
+  const weights = rows.map((r) => (1 / r.hold) * freshnessWeight(r.lastUpdate));
   const totalW = weights.reduce((a, c) => a + c, 0);
   const fairProb = rows.reduce((sum, r, i) => sum + r.fair * weights[i], 0) / totalW;
   const spread = rows.length > 1 ? Math.max(...rows.map((r) => r.fair)) - Math.min(...rows.map((r) => r.fair)) : 0;
-  // oldest (stalest) timestamp among the books actually used — the weak link
   const timestamps = rows.map((r) => r.lastUpdate).filter(Boolean).map((t) => new Date(t).getTime());
   const oldestUpdate = timestamps.length ? Math.min(...timestamps) : null;
-  return { fairProb, n: rows.length, spread, oldestUpdate };
+  return { fairProb, n: rows.length, spread, oldestUpdate, excludedCount };
 }
 
 // Formats a timestamp's age as short, color-coded text — green under a
@@ -378,20 +406,50 @@ const SPORT_TO_PP_LEAGUE = {
 // same path. Filters to the requested league and to standard lines only
 // (goblin/demon are boosted/discounted variants of the same prop, not a
 // separate line worth comparing against the sharp market).
+//
+// Also joins against the "included" player records (fetched via
+// include=new_player) to surface real player status — active/questionable/
+// out — separate from projection-level status like "pre_game"/"final".
+// The exact field name here (status vs injury_status) is unverified against
+// a live response, since PrizePicks doesn't document this endpoint at all.
+// If this doesn't populate correctly, check a raw fetch and the actual
+// field name needs correcting.
 function parsePrizePicksData(json, ppLeague) {
   const items = json?.data || [];
+  const included = json?.included || [];
+
+  const playerLookup = {};
+  included.forEach((inc) => {
+    if (inc.type === "new_player" || inc.type === "player") {
+      playerLookup[inc.id] = inc.attributes?.status || inc.attributes?.injury_status || null;
+    }
+  });
+
   return items
     .filter((it) => it.attributes?.odds_type === "standard")
     .filter((it) => !ppLeague || (it.attributes?.league_ppid || "").toUpperCase() === ppLeague.toUpperCase())
-    .map((it) => ({
-      name: it.attributes?.description || "Unknown",
-      stat: it.attributes?.stat_display_name || it.attributes?.stat_type || "",
-      line: it.attributes?.line_score,
-      isTeam: it.attributes?.event_type === "team",
-      startTime: it.attributes?.start_time,
-      status: it.attributes?.status,
-    }))
+    .map((it) => {
+      const playerId = it.relationships?.new_player?.data?.id;
+      return {
+        name: it.attributes?.description || "Unknown",
+        stat: it.attributes?.stat_display_name || it.attributes?.stat_type || "",
+        line: it.attributes?.line_score,
+        isTeam: it.attributes?.event_type === "team",
+        startTime: it.attributes?.start_time,
+        projectionStatus: it.attributes?.status,
+        playerStatus: playerId ? playerLookup[playerId] || null : null,
+      };
+    })
     .filter((r) => r.line != null);
+}
+
+// Values worth flagging as a real warning — not exhaustive, since the exact
+// vocabulary PrizePicks/its data source uses isn't confirmed.
+const CONCERNING_STATUSES = ["out", "doubtful", "questionable", "gtd", "injured", "inactive", "suspended"];
+function isConcerningStatus(status) {
+  if (!status) return false;
+  const s = status.toLowerCase();
+  return CONCERNING_STATUSES.some((c) => s.includes(c));
 }
 
 // Matches real PrizePicks projections (fetched separately, since PrizePicks
@@ -423,7 +481,7 @@ function buildPPComparison(sharpRows, ppRows) {
     const exact = sharpCandidates.find((c) => c.line === ppLine);
     if (exact) {
       out.push({
-        player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam,
+        player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam, playerStatus: ppRow.playerStatus,
         sharpLine: `${exact.line}`, method: "exact",
         sharpFairOver: exact.result.fairProb, sharpN: exact.result.n,
       });
@@ -437,7 +495,7 @@ function buildPPComparison(sharpRows, ppRows) {
       const weight = (ppLine - below.line) / (above.line - below.line);
       const interpFair = below.result.fairProb + (above.result.fairProb - below.result.fairProb) * weight;
       out.push({
-        player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam,
+        player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam, playerStatus: ppRow.playerStatus,
         sharpLine: `${below.line}–${above.line}`, method: "interpolated",
         sharpFairOver: interpFair, sharpN: Math.min(below.result.n, above.result.n),
       });
@@ -446,7 +504,7 @@ function buildPPComparison(sharpRows, ppRows) {
 
     const nearest = [...sharpCandidates].sort((a, b) => Math.abs(a.line - ppLine) - Math.abs(b.line - ppLine))[0];
     out.push({
-      player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam,
+      player: ppRow.name, stat: ppRow.stat, matchup: group.matchup, ppLine, isTeam: ppRow.isTeam, playerStatus: ppRow.playerStatus,
       sharpLine: `${nearest.line}`, method: "nearest", distance: Math.abs(nearest.line - ppLine),
       sharpFairOver: nearest.result.fairProb, sharpN: nearest.result.n,
     });
@@ -611,7 +669,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
         if (!best.fairProb) return null;
         const edgePts = (best.fairProb - 0.5) * 100;
         const grade = gradeForPick(edgePts, best.n, best.spread);
-        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade, oldestUpdate: best.oldestUpdate };
+        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade, oldestUpdate: best.oldestUpdate, excludedCount: best.excludedCount };
       })
       .filter(Boolean)
       .filter((r) => r.n >= minBooks && r.edgePts >= minEdge)
@@ -624,7 +682,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
     onQuickAdd({
       id: Date.now(), name: row.player, matchup: row.matchup, stat: row.stat, line: row.line, side,
       group: null, fairProb: result.fairProb, fairOdds: probToAmerican(result.fairProb), startTime: row.startTime,
-      books: row.books, include: true, confidence: { n: result.n, spread: result.spread, oldestUpdate: result.oldestUpdate },
+      books: row.books, include: true, confidence: { n: result.n, spread: result.spread, oldestUpdate: result.oldestUpdate, excludedCount: result.excludedCount },
     }, { propName: `${row.player}-${row.stat}`, snapshot: { timestamp: Date.now(), side, fairProb: result.fairProb, line: row.line, stat: row.stat } });
   };
 
@@ -742,6 +800,9 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
                     {formatAge(row.oldestUpdate) && (
                       <span style={{ color: formatAge(row.oldestUpdate).color }}>· {formatAge(row.oldestUpdate).text}</span>
                     )}
+                    {row.excludedCount > 0 && (
+                      <span style={{ color: COLORS.red }}>· {row.excludedCount} outlier excluded</span>
+                    )}
                   </div>
                 </div>
                 <button onClick={() => addFromRow(row, row.bestSide)} style={{ fontFamily: mono, fontSize: 11, padding: "6px 10px", borderRadius: 5, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer", flexShrink: 0, marginLeft: 8 }}>+ Add {row.bestSide}</button>
@@ -755,7 +816,10 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
           )}
 
           <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.line}` }}>
-            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 8 }}>PRIZEPICKS VS SHARP MARKET</div>
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 4 }}>PRIZEPICKS VS SHARP MARKET</div>
+            <p style={{ color: COLORS.faint, fontSize: 10, fontFamily: mono, margin: "0 0 10px", lineHeight: 1.5 }}>
+              Red border = player flagged out/questionable/doubtful. This is best-effort — the exact status field isn't documented by PrizePicks, so absence of a flag isn't a guarantee the player is active. Check the app before betting on anything here.
+            </p>
             {ppError && (
               <div style={{ display: "flex", gap: 6, color: COLORS.amber, fontSize: 12, marginBottom: 10, fontFamily: sans }}>
                 <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} /> {ppError}
@@ -765,9 +829,18 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
               <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No matches — either PrizePicks doesn't have this league live right now, or none of its lines matched a name+stat from the sharp fetch above. This now pulls PrizePicks directly (unofficial endpoint), so an empty result here is about matching or timing, not missing data entirely.</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {ppComparison.map((c, i) => (
-                  <div key={i} style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
-                    <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{c.player} — {c.stat}</div>
+                {ppComparison.map((c, i) => {
+                  const isFlagged = isConcerningStatus(c.playerStatus);
+                  return (
+                  <div key={i} style={{ background: COLORS.bg, border: `1px solid ${isFlagged ? COLORS.red : COLORS.line}`, borderRadius: 6, padding: "8px 10px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{c.player} — {c.stat}</div>
+                      {isFlagged && (
+                        <span style={{ fontFamily: mono, fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4, background: "rgba(255,92,92,0.15)", border: `1px solid ${COLORS.red}`, color: COLORS.red }}>
+                          {c.playerStatus.toUpperCase()}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ color: COLORS.faint, fontSize: 11, fontFamily: mono, marginBottom: 4 }}>{c.matchup}</div>
 
                     {c.method === "exact" && (
@@ -803,7 +876,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -887,7 +961,7 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
     onAdd(
       { id: Date.now(), name, matchup, stat, line: lineVal, side, group: group.trim() || null, startTime,
         fairProb, fairOdds: probToAmerican(fairProb), books: booksSnapshot, include: true,
-        confidence: meta ? { n: meta.n, spread: meta.spread, oldestUpdate: meta.oldestUpdate } : null },
+        confidence: meta ? { n: meta.n, spread: meta.spread, oldestUpdate: meta.oldestUpdate, excludedCount: meta.excludedCount } : null },
       mode === "books" ? { propName: `${name}-${stat}`, snapshot: { timestamp: Date.now(), side, fairProb, line: lineVal, stat } } : null
     );
 
@@ -992,6 +1066,7 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
               <div style={{ fontFamily: mono, fontSize: 11, color: preview.n === 1 ? COLORS.amber : COLORS.faint }}>
                 {preview.n} book{preview.n > 1 ? "s" : ""} used
                 {preview.n === 1 ? " · single-book price, lower confidence" : ` · books agree within ${(preview.spread * 100).toFixed(1)}pt`}
+                {preview.excludedCount > 0 && <span style={{ color: COLORS.red }}> · {preview.excludedCount} outlier book{preview.excludedCount > 1 ? "s" : ""} excluded</span>}
               </div>
             </div>
           )}
@@ -1049,6 +1124,9 @@ const BoardRow = memo(function BoardRow({ leg, onToggle, onRemove }) {
           )}
           {leg.confidence && formatAge(leg.confidence.oldestUpdate) && (
             <span style={{ fontFamily: mono, fontSize: 10, color: formatAge(leg.confidence.oldestUpdate).color }}>· {formatAge(leg.confidence.oldestUpdate).text}</span>
+          )}
+          {leg.confidence?.excludedCount > 0 && (
+            <span style={{ fontFamily: mono, fontSize: 10, color: COLORS.red }}>· {leg.confidence.excludedCount} excl.</span>
           )}
         </div>
       </td>
