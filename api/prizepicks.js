@@ -11,7 +11,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const url = "https://partner-api.prizepicks.com/projections?per_page=300";
+    const url = "https://partner-api.prizepicks.com/projections?per_page=300&include=new_player";
     const r = await fetch(url, {
       headers: {
         // some unofficial endpoints reject requests with no browser-like UA
