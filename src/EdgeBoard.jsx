@@ -504,13 +504,14 @@ const AutoSlipBuilder = memo(function AutoSlipBuilder({ ranked, onBuild }) {
   );
 });
 
-const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
+const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched }) {
   const [proxyUrl, setProxyUrl] = useState("");
   const [sport, setSport] = useState("basketball_wnba");
   const [markets, setMarkets] = useState(SPORT_MARKETS.basketball_wnba);
   const [marketsTouched, setMarketsTouched] = useState(false);
   const [rows, setRows] = useState([]);
   const [ppRows, setPpRows] = useState([]);
+  const [ppError, setPpError] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [minBooks, setMinBooks] = useState(2);
@@ -532,7 +533,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
 
   const fetchLive = async () => {
     if (!proxyUrl) return setError("Paste your deployed proxy URL first.");
-    setLoading(true); setError(""); setRows([]); setPpRows([]);
+    setLoading(true); setError(""); setPpError(""); setRows([]); setPpRows([]);
     try {
       const base = proxyUrl.replace(/\/$/, "");
 
@@ -545,14 +546,22 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
       if (oddsJson.error) throw new Error(oddsJson.error);
       const parsed = parseLiveOdds(oddsJson);
       setRows(parsed);
+      if (onRowsFetched) onRowsFetched(parsed);
       if (parsed.length === 0) setError("Connected, but found no player prop rows — the response shape may differ from what this expects. Check the raw JSON and let me know its structure.");
 
-      if (ppRes && ppRes.ok) {
+      // PrizePicks is an unofficial endpoint and fails intermittently — that's
+      // expected, not a bug. Never let it block or blank out the sharp-odds
+      // side of the fetch above; just surface it clearly and move on.
+      if (!ppRes) {
+        setPpError("PrizePicks fetch didn't complete — network issue reaching the proxy. Sharp odds above are unaffected.");
+      } else if (!ppRes.ok) {
+        setPpError(`PrizePicks returned an error (status ${ppRes.status}) — this unofficial endpoint fails intermittently. Try fetching again in a bit.`);
+      } else {
         try {
           const ppJson = await ppRes.json();
           setPpRows(parsePrizePicksData(ppJson, SPORT_TO_PP_LEAGUE[sport]));
         } catch (e) {
-          // PrizePicks fetch failing doesn't block the sharp-odds fetch above
+          setPpError("PrizePicks responded but the data couldn't be read — likely a temporary hiccup on their end.");
         }
       }
     } catch (e) {
@@ -715,6 +724,11 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
 
           <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.line}` }}>
             <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, letterSpacing: "0.06em", marginBottom: 8 }}>PRIZEPICKS VS SHARP MARKET</div>
+            {ppError && (
+              <div style={{ display: "flex", gap: 6, color: COLORS.amber, fontSize: 12, marginBottom: 10, fontFamily: sans }}>
+                <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} /> {ppError}
+              </div>
+            )}
             {ppComparison.length === 0 ? (
               <p style={{ color: COLORS.faint, fontSize: 12, fontFamily: mono }}>No matches — either PrizePicks doesn't have this league live right now, or none of its lines matched a name+stat from the sharp fetch above. This now pulls PrizePicks directly (unofficial endpoint), so an empty result here is about matching or timing, not missing data entirely.</p>
             ) : (
@@ -767,7 +781,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd }) {
   );
 });
 
-const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGroup }) {
+const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGroup, liveRows }) {
   const [name, setName] = useState("");
   const [matchup, setMatchup] = useState(defaultMatchup || "");
   const [stat, setStat] = useState("");
@@ -779,8 +793,32 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
   const [manualProb, setManualProb] = useState("");
   const [mode, setMode] = useState("books");
   const [error, setError] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
 
   const preview = useMemo(() => (mode === "books" ? computeFairFromBooks(bookInputs, side) : null), [bookInputs, side, mode]);
+
+  // Auto-devig: matches whatever's already been fetched via Live Feed against
+  // what's typed here, so picking a suggestion fills matchup/stat/line/book
+  // odds — and the favored side — in one tap instead of typing or
+  // quick-pasting odds by hand.
+  const suggestions = useMemo(() => {
+    if (mode !== "books" || name.trim().length < 2 || !liveRows?.length) return [];
+    const q = name.trim().toLowerCase();
+    return liveRows.filter((r) => r.player.toLowerCase().includes(q)).slice(0, 6);
+  }, [name, liveRows, mode]);
+
+  const applySuggestion = (row) => {
+    const overResult = computeFairFromBooks(row.books, "Over");
+    const underResult = computeFairFromBooks(row.books, "Under");
+    const favoredSide = (overResult?.fairProb ?? 0) >= (underResult?.fairProb ?? 0) ? "Over" : "Under";
+    setName(row.player);
+    setMatchup(row.matchup);
+    setStat(row.stat);
+    setLineVal(row.line);
+    setSide(favoredSide);
+    setBookInputs(JSON.parse(JSON.stringify(row.books)));
+    setShowSuggestions(false);
+  };
 
   const applyQuickPaste = (text) => {
     setQuickPaste(text);
@@ -831,9 +869,32 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-        <Field label="Player / Team"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Jackie Young, or CIN for a team total" /></Field>
+        <Field label="Player / Team">
+          <input
+            style={inputStyle}
+            value={name}
+            onChange={(e) => { setName(e.target.value); setShowSuggestions(true); }}
+            onFocus={() => setShowSuggestions(true)}
+            placeholder="e.g. Jackie Young, or CIN for a team total"
+          />
+          {showSuggestions && suggestions.length > 0 && (
+            <div style={{ marginTop: 4, background: COLORS.bg, border: `1px solid ${COLORS.green}`, borderRadius: 6, overflow: "hidden" }}>
+              {suggestions.map((r, i) => (
+                <button
+                  key={i}
+                  onClick={() => applySuggestion(r)}
+                  style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: i < suggestions.length - 1 ? `1px solid ${COLORS.line}` : "none", padding: "8px 10px", cursor: "pointer", color: COLORS.text, fontFamily: mono, fontSize: 12 }}
+                >
+                  <span style={{ fontWeight: 600 }}>{r.player}</span> — {r.stat} {r.line}
+                  <span style={{ color: COLORS.faint }}> · {r.matchup}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Field>
         <Field label="Matchup"><input style={inputStyle} value={matchup} onChange={(e) => setMatchup(e.target.value)} placeholder="e.g. LVA vs. NYL" /></Field>
       </div>
+
 
       <div style={{ marginBottom: 10 }}>
         <Field label="Stat">
@@ -1168,6 +1229,7 @@ const CLVPanel = memo(function CLVPanel({ predictions }) {
 
 export default function EdgeBoard() {
   const [legs, setLegs] = useState([]);
+  const [liveRows, setLiveRows] = useState([]);
   const [entryType, setEntryType] = useState("power");
   const [multipliers, setMultipliers] = useState({ ...DEFAULT_POWER });
   const [flexMultipliers, setFlexMultipliers] = useState(
@@ -1315,12 +1377,13 @@ export default function EdgeBoard() {
           <p style={{ color: COLORS.muted, fontSize: 13, margin: 0 }}>De-vig lines across books, spot the value, track the move.</p>
         </div>
 
-        <LiveFeedPanel onQuickAdd={handleAddLeg} />
+        <LiveFeedPanel onQuickAdd={handleAddLeg} onRowsFetched={setLiveRows} />
 
         <AddLegPanel
           onAdd={handleAddLeg}
           defaultMatchup={lastLeg?.matchup}
           defaultGroup={lastLeg?.group}
+          liveRows={liveRows}
           key={legs.length === 0 ? "empty" : "has-legs"}
         />
 
