@@ -105,6 +105,17 @@ const probToAmerican = (p) => {
 };
 
 const pct = (x) => (x == null ? "—" : `${(x * 100).toFixed(1)}%`);
+
+// Shows the point estimate plus its heuristic range, e.g. "62% (56–68%)" —
+// makes the false precision of a single number visible instead of implying
+// certainty a 1-2 book price doesn't actually support.
+const pctRange = (fairProb, halfWidth) => {
+  if (fairProb == null) return "—";
+  if (halfWidth == null) return pct(fairProb);
+  const lo = Math.max(0, fairProb - halfWidth) * 100;
+  const hi = Math.min(1, fairProb + halfWidth) * 100;
+  return `${(fairProb * 100).toFixed(1)}% (${lo.toFixed(0)}–${hi.toFixed(0)}%)`;
+};
 const oddsFmt = (o) => (o == null || o === "" ? null : Number(o) > 0 ? `+${o}` : `${o}`);
 const slugify = (s) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "leg";
 
@@ -266,7 +277,15 @@ function computeFairFromBooks(books, side) {
   const spread = rows.length > 1 ? Math.max(...rows.map((r) => r.fair)) - Math.min(...rows.map((r) => r.fair)) : 0;
   const timestamps = rows.map((r) => r.lastUpdate).filter(Boolean).map((t) => new Date(t).getTime());
   const oldestUpdate = timestamps.length ? Math.min(...timestamps) : null;
-  return { fairProb, n: rows.length, spread, oldestUpdate, excludedCount };
+
+  // Heuristic uncertainty range, not a real statistical CI — there's no
+  // sampling distribution here, just book disagreement as a proxy for how
+  // trustworthy the point estimate is. A single book gets a flat assumed
+  // uncertainty since there's nothing to compare it against; 2+ books
+  // shrink the range as they agree more and as more of them pile on.
+  const halfWidth = rows.length === 1 ? 0.05 : Math.max(0.015, (spread / 2) / Math.sqrt(rows.length));
+
+  return { fairProb, n: rows.length, spread, oldestUpdate, excludedCount, halfWidth };
 }
 
 // Formats a timestamp's age as short, color-coded text — green under a
@@ -336,12 +355,17 @@ const chipStyle = (active) => ({
 // A composite grade for how much to TRUST a number, not how likely it is to
 // win — those are different things, and treating them as the same is exactly
 // the overconfidence that gets people in trouble. A "C" pick can hit and an
-// "A+" pick can miss; the grade only reflects edge size, book agreement, and
-// how many books back the number. It cannot and does not predict outcomes.
-function gradeForPick(edgePts, n, spread) {
+// "A+" pick can miss; the grade only reflects edge size, book agreement,
+// how many books back the number, and recent line movement in the pick's
+// favor. It cannot and does not predict outcomes.
+function gradeForPick(edgePts, n, spread, steamPts) {
   const confidenceMult = n >= 3 ? 1 : n === 2 ? 0.8 : 0.55;
   const spreadPenalty = (spread || 0) * 100 * 0.6;
-  const score = Math.max(0, edgePts * confidenceMult - spreadPenalty);
+  // only steam moving toward the pick's side counts as a bonus — movement
+  // against it isn't penalized here since that's already reflected in the
+  // fair probability itself, not double-counted as a separate ding
+  const steamBonus = steamPts > 0 ? Math.min(steamPts, 10) * 0.4 : 0;
+  const score = Math.max(0, edgePts * confidenceMult - spreadPenalty + steamBonus);
 
   if (score >= 12) return { letter: "A+", color: "#35C48C", score };
   if (score >= 8) return { letter: "A", color: "#35C48C", score };
@@ -601,6 +625,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
   const [error, setError] = useState("");
   const [minBooks, setMinBooks] = useState(2);
   const [minEdge, setMinEdge] = useState(3);
+  const [steamMap, setSteamMap] = useState({});
 
   useEffect(() => {
     (async () => {
@@ -633,6 +658,34 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
       setRows(parsed);
       if (onRowsFetched) onRowsFetched(parsed);
       if (parsed.length === 0) setError("Connected, but found no player prop rows — the response shape may differ from what this expects. Check the raw JSON and let me know its structure.");
+
+      // Steam: compare this fetch's fair probability against the last fetch's
+      // for the same exact prop, to catch line movement between successive
+      // "Fetch live props" taps. Snapshot fully overwritten each fetch so
+      // storage doesn't grow unbounded with props no longer being tracked.
+      try {
+        let priorSnapshots = {};
+        try {
+          const res = await storage.get("steam-snapshots");
+          priorSnapshots = res ? JSON.parse(res.value) : {};
+        } catch (e) { priorSnapshots = {}; }
+
+        const nextSnapshots = {};
+        const steam = {};
+        parsed.forEach((row) => {
+          const key = `${row.player}|${row.stat}|${row.line}|${row.matchup}`;
+          const overResult = computeFairFromBooks(row.books, "Over");
+          if (overResult) {
+            nextSnapshots[key] = { overFair: overResult.fairProb, timestamp: Date.now() };
+            const prior = priorSnapshots[key];
+            if (prior) steam[key] = (overResult.fairProb - prior.overFair) * 100;
+          }
+        });
+        setSteamMap(steam);
+        storage.set("steam-snapshots", JSON.stringify(nextSnapshots)).catch(() => {});
+      } catch (e) {
+        // steam detection failing should never block the main fetch above
+      }
 
       // PrizePicks is an unofficial endpoint and fails intermittently — that's
       // expected, not a bug. Never let it block or blank out the sharp-odds
@@ -668,13 +721,19 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
           : { side: "Under", ...underResult };
         if (!best.fairProb) return null;
         const edgePts = (best.fairProb - 0.5) * 100;
-        const grade = gradeForPick(edgePts, best.n, best.spread);
-        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade, oldestUpdate: best.oldestUpdate, excludedCount: best.excludedCount };
+        const steamKey = `${row.player}|${row.stat}|${row.line}|${row.matchup}`;
+        const rawSteam = steamMap[steamKey];
+        // rawSteam tracks Over-side movement; translate to "movement toward
+        // the side actually being picked" so Under picks benefit from the
+        // market moving down, not just Over picks benefiting from it moving up
+        const steamPts = rawSteam == null ? 0 : best.side === "Over" ? rawSteam : -rawSteam;
+        const grade = gradeForPick(edgePts, best.n, best.spread, steamPts);
+        return { ...row, bestSide: best.side, bestFairProb: best.fairProb, n: best.n, spread: best.spread, edgePts, grade, oldestUpdate: best.oldestUpdate, excludedCount: best.excludedCount, halfWidth: best.halfWidth, steamPts };
       })
       .filter(Boolean)
       .filter((r) => r.n >= minBooks && r.edgePts >= minEdge)
       .sort((a, b) => b.edgePts - a.edgePts);
-  }, [rows, minBooks, minEdge]);
+  }, [rows, minBooks, minEdge, steamMap]);
 
   const addFromRow = (row, side) => {
     const result = computeFairFromBooks(row.books, side);
@@ -682,7 +741,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
     onQuickAdd({
       id: Date.now(), name: row.player, matchup: row.matchup, stat: row.stat, line: row.line, side,
       group: null, fairProb: result.fairProb, fairOdds: probToAmerican(result.fairProb), startTime: row.startTime,
-      books: row.books, include: true, confidence: { n: result.n, spread: result.spread, oldestUpdate: result.oldestUpdate, excludedCount: result.excludedCount },
+      books: row.books, include: true, confidence: { n: result.n, spread: result.spread, oldestUpdate: result.oldestUpdate, excludedCount: result.excludedCount, halfWidth: result.halfWidth },
     }, { propName: `${row.player}-${row.stat}`, snapshot: { timestamp: Date.now(), side, fairProb: result.fairProb, line: row.line, stat: row.stat } });
   };
 
@@ -778,8 +837,9 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
           </div>
 
           <p style={{ color: COLORS.faint, fontSize: 10, fontFamily: mono, marginTop: 0, marginBottom: 10, lineHeight: 1.5 }}>
-            Grade = edge size × book agreement, not win probability. A "D" pick and an "A+" pick can both hit or miss —
-            the letter tells you how much to trust the number, not what will happen.
+            Grade = edge size × book agreement + recent steam, not win probability. A "D" pick and an "A+" pick can both
+            hit or miss — the letter tells you how much to trust the number, not what will happen. 🔥 steam compares
+            this fetch to your last one for the same prop — it only shows up starting on your second fetch of a session.
           </p>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 400, overflowY: "auto" }}>
@@ -794,7 +854,7 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
                     {row.matchup}{formatGameTime(row.startTime) ? ` · ${formatGameTime(row.startTime)}` : ""}
                   </div>
                   <div style={{ display: "flex", gap: 8, marginTop: 3, fontFamily: mono, fontSize: 11, flexWrap: "wrap" }}>
-                    <span style={{ color: COLORS.green, fontWeight: 700 }}>{row.bestSide} favored · {pct(row.bestFairProb)}</span>
+                    <span style={{ color: COLORS.green, fontWeight: 700 }}>{row.bestSide} favored · {pctRange(row.bestFairProb, row.halfWidth)}</span>
                     <span style={{ color: COLORS.amber }}>+{row.edgePts.toFixed(1)}pt edge</span>
                     <span style={{ color: row.n === 1 ? COLORS.amber : COLORS.faint }}>{row.n} bk{row.n > 1 ? "s" : ""}</span>
                     {formatAge(row.oldestUpdate) && (
@@ -802,6 +862,9 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
                     )}
                     {row.excludedCount > 0 && (
                       <span style={{ color: COLORS.red }}>· {row.excludedCount} outlier excluded</span>
+                    )}
+                    {row.steamPts >= 3 && (
+                      <span style={{ color: COLORS.green, fontWeight: 700 }}>🔥 steam +{row.steamPts.toFixed(1)}pt</span>
                     )}
                   </div>
                 </div>
@@ -961,7 +1024,7 @@ const AddLegPanel = memo(function AddLegPanel({ onAdd, defaultMatchup, defaultGr
     onAdd(
       { id: Date.now(), name, matchup, stat, line: lineVal, side, group: group.trim() || null, startTime,
         fairProb, fairOdds: probToAmerican(fairProb), books: booksSnapshot, include: true,
-        confidence: meta ? { n: meta.n, spread: meta.spread, oldestUpdate: meta.oldestUpdate, excludedCount: meta.excludedCount } : null },
+        confidence: meta ? { n: meta.n, spread: meta.spread, oldestUpdate: meta.oldestUpdate, excludedCount: meta.excludedCount, halfWidth: meta.halfWidth } : null },
       mode === "books" ? { propName: `${name}-${stat}`, snapshot: { timestamp: Date.now(), side, fairProb, line: lineVal, stat } } : null
     );
 
@@ -1111,7 +1174,7 @@ const BoardRow = memo(function BoardRow({ leg, onToggle, onRemove }) {
       </td>
       <td style={{ padding: "10px 10px 10px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <div style={{ fontFamily: mono, fontSize: 14, color: COLORS.text, fontWeight: 600 }}>{pct(leg.fairProb)}</div>
+          <div style={{ fontFamily: mono, fontSize: 14, color: COLORS.text, fontWeight: 600 }}>{pctRange(leg.fairProb, leg.confidence?.halfWidth)}</div>
           {leg.confidence && (
             <span style={{ fontFamily: mono, fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4, border: `1px solid ${gradeForPick((leg.fairProb - 0.5) * 100, leg.confidence.n, leg.confidence.spread).color}`, color: gradeForPick((leg.fairProb - 0.5) * 100, leg.confidence.n, leg.confidence.spread).color }}>
               {gradeForPick((leg.fairProb - 0.5) * 100, leg.confidence.n, leg.confidence.spread).letter}
@@ -1187,9 +1250,38 @@ function buildCalibrationReport(predictions) {
   return { report, graded, brier, totalHits: graded.filter((p) => p.result === "hit").length };
 }
 
+// Same idea as the probability-bucket report, sliced by stat type instead —
+// reveals whether calibration varies by category (e.g. points props running
+// well-calibrated while assists props run consistently hot), which a single
+// pooled report can't show since it averages that difference away.
+function buildCategoryCalibration(predictions) {
+  const graded = predictions.filter((p) => p.result === "hit" || p.result === "miss");
+  const byCategory = {};
+  graded.forEach((p) => {
+    const cat = (p.stat || "unknown").trim().toLowerCase() || "unknown";
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(p);
+  });
+  return Object.entries(byCategory)
+    .map(([cat, picks]) => {
+      const hits = picks.filter((p) => p.result === "hit").length;
+      const brier = picks.reduce((s, p) => s + Math.pow((p.result === "hit" ? 1 : 0) - p.fairProb, 2), 0) / picks.length;
+      return {
+        category: cat,
+        n: picks.length,
+        predicted: (picks.reduce((s, p) => s + p.fairProb, 0) / picks.length) * 100,
+        actual: (hits / picks.length) * 100,
+        brier,
+      };
+    })
+    .filter((c) => c.n >= 2)
+    .sort((a, b) => b.n - a.n);
+}
+
 const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }) {
   const ungraded = predictions.filter((p) => p.result === null).sort((a, b) => b.timestamp - a.timestamp);
   const { report, graded, brier, totalHits } = useMemo(() => buildCalibrationReport(predictions), [predictions]);
+  const categoryReport = useMemo(() => buildCategoryCalibration(predictions), [predictions]);
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
@@ -1233,6 +1325,34 @@ const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }
             ⚠ flags buckets where actual hit rate is 10+ points off predicted, with at least 5 graded picks — small
             sample sizes will bounce around a lot, so don't over-read a bucket with only 2-3 picks in it.
           </p>
+
+          {categoryReport.length > 0 && (
+            <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
+              <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.muted, marginBottom: 8 }}>BY STAT CATEGORY</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr 1fr 40px", fontFamily: mono, fontSize: 10, color: COLORS.faint }}>
+                  <span>STAT</span><span>PREDICTED</span><span>ACTUAL</span><span>BRIER</span><span>N</span>
+                </div>
+                {categoryReport.map((c) => {
+                  const gap = c.actual - c.predicted;
+                  const flag = Math.abs(gap) >= 10 && c.n >= 5;
+                  return (
+                    <div key={c.category} style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr 1fr 40px", fontFamily: mono, fontSize: 12, alignItems: "center", padding: "4px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                      <span style={{ color: COLORS.text, textTransform: "capitalize" }}>{c.category}</span>
+                      <span style={{ color: COLORS.faint }}>{c.predicted.toFixed(1)}%</span>
+                      <span style={{ color: flag ? COLORS.red : COLORS.green }}>{c.actual.toFixed(1)}%{flag ? " ⚠" : ""}</span>
+                      <span style={{ color: COLORS.faint }}>{c.brier.toFixed(3)}</span>
+                      <span style={{ color: COLORS.faint }}>{c.n}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p style={{ color: COLORS.faint, fontSize: 10, margin: "8px 0 0", fontFamily: mono }}>
+                Grouped by stat type only (not sport + stat) — a "points" row blends every sport you've logged points
+                props for. Same small-sample caution applies here, maybe more so.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
