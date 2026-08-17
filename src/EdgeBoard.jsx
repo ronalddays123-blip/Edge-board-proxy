@@ -43,6 +43,32 @@ function extractSide(outcomeName) {
   return null;
 }
 
+// Maps our stat display names (from the-odds-api-style market keys) to MLB
+// Stats API's actual gameLog field names — these don't match 1:1.
+const MLB_STAT_FIELD_MAP = {
+  "hits": "hits",
+  "home runs": "homeRuns",
+  "strikeouts": "strikeOuts",
+  "runs": "runs",
+  "rbis": "rbi",
+  "total bases": "totalBases",
+  "walks": "baseOnBalls",
+};
+
+// Independent forecast, not derived from any bookmaker price — literally
+// what fraction of the player's actual recent games cleared this exact line.
+// This is intentionally simple and auditable: no hidden weighting, nothing
+// you can't verify by counting the games yourself.
+function computeEmpiricalModel(games, statField, line, side, lookback = 20) {
+  const recent = games.slice(-lookback);
+  const values = recent
+    .map((g) => g.stat?.[statField])
+    .filter((v) => v != null);
+  if (values.length === 0) return null;
+  const clears = values.filter((v) => (side === "Over" ? v > line : v < line)).length;
+  return { modelProb: clears / values.length, gamesUsed: values.length };
+}
+
 function parseLiveOdds(json) {
   const events = Array.isArray(json) ? json : Object.values(json || {}).flat();
   const rows = {};
@@ -626,6 +652,8 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
   const [minBooks, setMinBooks] = useState(2);
   const [minEdge, setMinEdge] = useState(3);
   const [steamMap, setSteamMap] = useState({});
+  const [modelResults, setModelResults] = useState({});
+  const [modelLoading, setModelLoading] = useState({});
 
   useEffect(() => {
     (async () => {
@@ -706,6 +734,28 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
       setError(`Fetch failed: ${e.message}. Remember this only works when Edge Board is deployed live, not inside the Claude.ai preview.`);
     }
     setLoading(false);
+  };
+
+  const fetchModel = async (row) => {
+    const rowKey = `${row.player}|${row.stat}|${row.line}|${row.matchup}`;
+    const statField = MLB_STAT_FIELD_MAP[row.stat.toLowerCase()];
+    if (!statField) {
+      setModelResults((prev) => ({ ...prev, [rowKey]: { error: `No model mapping for stat "${row.stat}" yet.` } }));
+      return;
+    }
+    setModelLoading((prev) => ({ ...prev, [rowKey]: true }));
+    try {
+      const base = proxyUrl.replace(/\/$/, "");
+      const res = await fetch(`${base}/api/mlb-stats?player=${encodeURIComponent(row.player)}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      const result = computeEmpiricalModel(json.games || [], statField, Number(row.line), row.bestSide);
+      if (!result) throw new Error("Player found, but no recent game data to build a model from.");
+      setModelResults((prev) => ({ ...prev, [rowKey]: result }));
+    } catch (e) {
+      setModelResults((prev) => ({ ...prev, [rowKey]: { error: e.message } }));
+    }
+    setModelLoading((prev) => ({ ...prev, [rowKey]: false }));
   };
 
   // rank every fetched row by its strongest side's edge off a 50% coin flip —
@@ -840,6 +890,9 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
             Grade = edge size × book agreement + recent steam, not win probability. A "D" pick and an "A+" pick can both
             hit or miss — the letter tells you how much to trust the number, not what will happen. 🔥 steam compares
             this fetch to your last one for the same prop — it only shows up starting on your second fetch of a session.
+            For MLB, "Get model" pulls a player's actual last 20 games from MLB's free public stats API and computes
+            an independent probability from real results — not derived from any book's price. Disagreement with the
+            market is the most useful signal it can give you, more than agreement is.
           </p>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 400, overflowY: "auto" }}>
@@ -867,6 +920,35 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
                       <span style={{ color: COLORS.green, fontWeight: 700 }}>🔥 steam +{row.steamPts.toFixed(1)}pt</span>
                     )}
                   </div>
+                  {sport === "baseball_mlb" && (() => {
+                    const rowKey = `${row.player}|${row.stat}|${row.line}|${row.matchup}`;
+                    const model = modelResults[rowKey];
+                    const isLoading = modelLoading[rowKey];
+                    return (
+                      <div style={{ marginTop: 4 }}>
+                        {!model && !isLoading && (
+                          <button onClick={() => fetchModel(row)} style={{ fontFamily: mono, fontSize: 10, padding: "3px 7px", borderRadius: 4, border: `1px solid ${COLORS.faint}`, color: COLORS.faint, background: "transparent", cursor: "pointer" }}>
+                            Get model (last 20 games)
+                          </button>
+                        )}
+                        {isLoading && <span style={{ fontFamily: mono, fontSize: 10, color: COLORS.faint }}>Loading model…</span>}
+                        {model?.error && <span style={{ fontFamily: mono, fontSize: 10, color: COLORS.amber }}>{model.error}</span>}
+                        {model?.modelProb != null && (() => {
+                          const gapPts = Math.abs(model.modelProb - row.bestFairProb) * 100;
+                          const agreeColor = gapPts < 5 ? COLORS.green : gapPts < 15 ? COLORS.amber : COLORS.red;
+                          return (
+                            <div style={{ fontFamily: mono, fontSize: 11 }}>
+                              <span style={{ color: COLORS.text }}>Model: {pct(model.modelProb)}</span>
+                              <span style={{ color: COLORS.faint }}> ({model.gamesUsed} games) vs Market: {pct(row.bestFairProb)} </span>
+                              <span style={{ color: agreeColor, fontWeight: 700 }}>
+                                {gapPts < 5 ? "· agree" : gapPts < 15 ? `· ${gapPts.toFixed(0)}pt gap` : `· ⚠ ${gapPts.toFixed(0)}pt disagreement`}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <button onClick={() => addFromRow(row, row.bestSide)} style={{ fontFamily: mono, fontSize: 11, padding: "6px 10px", borderRadius: 5, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: "pointer", flexShrink: 0, marginLeft: 8 }}>+ Add {row.bestSide}</button>
               </div>
@@ -1772,48 +1854,4 @@ export default function EdgeBoard() {
                 <option value="" disabled>Select a tracked prop…</option>
                 {historyIndex.map((h) => <option key={h.slug} value={h.slug}>{h.name}</option>)}
               </select>
-              {historyLoading && <p style={{ color: COLORS.faint, fontSize: 12 }}>Loading…</p>}
-              {!historyLoading && historyData.length > 0 && (
-                <>
-                  {historyData.length > 1 && delta != null && (
-                    <div style={{ display: "flex", gap: 16, marginBottom: 12, fontFamily: mono, fontSize: 12 }}>
-                      <span style={{ color: COLORS.faint }}>OPEN: <span style={{ color: COLORS.text }}>{pct(opening.fairProb)}</span></span>
-                      <span style={{ color: COLORS.faint }}>NOW: <span style={{ color: COLORS.text }}>{pct(current.fairProb)}</span></span>
-                      <span style={{ color: Math.abs(delta) >= 3 ? (delta > 0 ? COLORS.green : COLORS.red) : COLORS.muted }}>
-                        Δ {delta >= 0 ? "+" : ""}{delta.toFixed(1)} pts {Math.abs(delta) >= 3 ? (delta > 0 ? "· steam toward your side" : "· steam away from your side") : ""}
-                      </span>
-                    </div>
-                  )}
-                  <div style={{ height: 180 }}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={historyChart}>
-                        <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
-                        <XAxis dataKey="idx" tick={{ fill: COLORS.faint, fontSize: 11 }} stroke={COLORS.line} />
-                        <YAxis tick={{ fill: COLORS.faint, fontSize: 11 }} stroke={COLORS.line} domain={["dataMin - 3", "dataMax + 3"]} />
-                        <Tooltip contentStyle={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, fontFamily: mono, fontSize: 12 }} labelFormatter={(v) => `Entry #${v}`} formatter={(v) => [`${v}%`, "Fair prob"]} />
-                        <Line type="monotone" dataKey="fairPct" stroke={COLORS.green} strokeWidth={2} dot={{ r: 3 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </>
-              )}
-              {!historyLoading && selectedHistoryProp && historyData.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12 }}>No snapshots yet for this prop.</p>}
-            </>
-          )}
-        </div>
-
-        {legs.length === 0 && (
-          <div style={{ color: COLORS.faint, fontSize: 13, textAlign: "center", padding: "40px 0", fontFamily: mono }}>Add a leg above to populate the board.</div>
-        )}
-
-        <p style={{ color: COLORS.faint, fontSize: 11, marginTop: 24, lineHeight: 1.5 }}>
-          Vig is now removed with the power method (compresses extreme prices better than simple proportional scaling),
-          and when multiple books agree, tighter (lower-hold) lines are weighted more heavily. The "n books" tag on
-          each leg tells you how much agreement backs that number — treat single-book legs with more caution.
-          Correlation values are still your own estimate. PrizePicks multipliers vary by state/promotion — verify
-          in-app. No calculator guarantees profit.
-        </p>
-      </div>
-    </div>
-  );
-}
+       
