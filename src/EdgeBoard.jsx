@@ -43,16 +43,20 @@ function extractSide(outcomeName) {
   return null;
 }
 
-// Maps our stat display names (from the-odds-api-style market keys) to MLB
-// Stats API's actual gameLog field names — these don't match 1:1.
-const MLB_STAT_FIELD_MAP = {
-  "hits": "hits",
-  "home runs": "homeRuns",
-  "strikeouts": "strikeOuts",
-  "runs": "runs",
-  "rbis": "rbi",
-  "total bases": "totalBases",
-  "walks": "baseOnBalls",
+// Maps our stat display names to both the correct MLB Stats API stat
+// group (hitting vs pitching) and the actual gameLog field name — these
+// are two separate mismatches with our naming, not just one. Strikeouts
+// specifically means pitcher Ks thrown in almost every player-prop context,
+// which lives under "pitching," not "hitting" — a real bug caught by an
+// actual failed lookup on a pitcher prop, not a hypothetical.
+const MLB_STAT_CONFIG = {
+  "hits": { group: "hitting", field: "hits" },
+  "home runs": { group: "hitting", field: "homeRuns" },
+  "runs": { group: "hitting", field: "runs" },
+  "rbis": { group: "hitting", field: "rbi" },
+  "total bases": { group: "hitting", field: "totalBases" },
+  "walks": { group: "hitting", field: "baseOnBalls" },
+  "strikeouts": { group: "pitching", field: "strikeOuts" },
 };
 
 // Independent forecast, not derived from any bookmaker price — literally
@@ -738,19 +742,19 @@ const LiveFeedPanel = memo(function LiveFeedPanel({ onQuickAdd, onRowsFetched })
 
   const fetchModel = async (row) => {
     const rowKey = `${row.player}|${row.stat}|${row.line}|${row.matchup}`;
-    const statField = MLB_STAT_FIELD_MAP[row.stat.toLowerCase()];
-    if (!statField) {
+    const config = MLB_STAT_CONFIG[row.stat.toLowerCase()];
+    if (!config) {
       setModelResults((prev) => ({ ...prev, [rowKey]: { error: `No model mapping for stat "${row.stat}" yet.` } }));
       return;
     }
     setModelLoading((prev) => ({ ...prev, [rowKey]: true }));
     try {
       const base = proxyUrl.replace(/\/$/, "");
-      const res = await fetch(`${base}/api/mlb-stats?player=${encodeURIComponent(row.player)}`);
+      const res = await fetch(`${base}/api/mlb-stats?player=${encodeURIComponent(row.player)}&group=${config.group}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
-      const result = computeEmpiricalModel(json.games || [], statField, Number(row.line), row.bestSide);
-      if (!result) throw new Error("Player found, but no recent game data to build a model from.");
+      const result = computeEmpiricalModel(json.games || [], config.field, Number(row.line), row.bestSide);
+      if (!result) throw new Error(`Player found, but no recent ${config.group} data to build a model from.`);
       setModelResults((prev) => ({ ...prev, [rowKey]: result }));
     } catch (e) {
       setModelResults((prev) => ({ ...prev, [rowKey]: { error: e.message } }));
@@ -1365,6 +1369,63 @@ const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }
   const { report, graded, brier, totalHits } = useMemo(() => buildCalibrationReport(predictions), [predictions]);
   const categoryReport = useMemo(() => buildCategoryCalibration(predictions), [predictions]);
 
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [autoGrading, setAutoGrading] = useState(false);
+  const [autoGradeLog, setAutoGradeLog] = useState([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await storage.get("proxy-url");
+        if (res?.value) setProxyUrl(res.value);
+      } catch (e) { /* no saved url yet */ }
+    })();
+  }, []);
+
+  // Reuses the same MLB Stats API proxy the model feature uses. Only
+  // attempts props whose stat name matches a known MLB stat — a heuristic,
+  // not a real sport tag on the prediction, since that isn't tracked.
+  // Matches by exact game date, so an ungraded pick with no completed game
+  // yet on that date is correctly left alone rather than guessed at.
+  const autoGradeMLB = async () => {
+    if (!proxyUrl) { setAutoGradeLog(["No proxy URL saved yet — fetch something in Live Feed first so it's remembered."]); return; }
+    setAutoGrading(true);
+    const log = [];
+    const base = proxyUrl.replace(/\/$/, "");
+    const candidates = ungraded.filter((p) => MLB_STAT_CONFIG[(p.stat || "").toLowerCase()]);
+
+    if (candidates.length === 0) {
+      setAutoGradeLog(["No ungraded picks match a known MLB stat right now."]);
+      setAutoGrading(false);
+      return;
+    }
+
+    for (const p of candidates) {
+      const config = MLB_STAT_CONFIG[p.stat.toLowerCase()];
+      try {
+        const res = await fetch(`${base}/api/mlb-stats?player=${encodeURIComponent(p.player)}&group=${config.group}`);
+        const json = await res.json();
+        if (json.error) { log.push(`${p.player}: ${json.error}`); continue; }
+        const games = json.games || [];
+        let game = null;
+        if (p.startTime) {
+          const targetDate = new Date(p.startTime).toISOString().slice(0, 10);
+          game = games.find((g) => g.date === targetDate);
+        }
+        if (!game) { log.push(`${p.player} ${p.stat}: no completed game found for that date yet — try again later.`); continue; }
+        const value = game.stat?.[config.field];
+        if (value == null) { log.push(`${p.player} ${p.stat}: stat field missing from that game's data.`); continue; }
+        const hit = p.side === "Over" ? value > Number(p.line) : value < Number(p.line);
+        onGrade(p.id, hit ? "hit" : "miss");
+        log.push(`${p.player} ${p.stat} ${p.line}: actual ${value} → ${hit ? "HIT" : "MISS"}`);
+      } catch (e) {
+        log.push(`${p.player}: ${e.message}`);
+      }
+    }
+    setAutoGradeLog(log);
+    setAutoGrading(false);
+  };
+
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
       <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 4 }}>CALIBRATION TRACKER</div>
@@ -1440,7 +1501,19 @@ const CalibrationPanel = memo(function CalibrationPanel({ predictions, onGrade }
 
       {ungraded.length > 0 && (
         <div>
-          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.amber, marginBottom: 8 }}>{ungraded.length} UNGRADED</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.amber }}>{ungraded.length} UNGRADED</div>
+            <button onClick={autoGradeMLB} disabled={autoGrading} style={{ fontFamily: mono, fontSize: 10, padding: "4px 8px", borderRadius: 4, border: `1px solid ${COLORS.green}`, color: COLORS.green, background: "transparent", cursor: autoGrading ? "default" : "pointer", opacity: autoGrading ? 0.6 : 1 }}>
+              {autoGrading ? "Grading…" : "Auto-grade MLB"}
+            </button>
+          </div>
+          {autoGradeLog.length > 0 && (
+            <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", marginBottom: 10, maxHeight: 140, overflowY: "auto" }}>
+              {autoGradeLog.map((line, i) => (
+                <div key={i} style={{ fontFamily: mono, fontSize: 10, color: line.includes("HIT") ? COLORS.green : line.includes("MISS") ? COLORS.red : COLORS.faint, marginBottom: 2 }}>{line}</div>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto" }}>
             {ungraded.map((p) => (
               <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "7px 10px" }}>
@@ -1605,7 +1678,7 @@ export default function EdgeBoard() {
       const next = [...prev, {
         id: leg.id, player: leg.name, stat: leg.stat, line: leg.line, side: leg.side,
         matchup: leg.matchup, fairProb: leg.fairProb, timestamp: Date.now(), result: null,
-        propKey: slugify(`${leg.name}-${leg.stat}`),
+        propKey: slugify(`${leg.name}-${leg.stat}`), startTime: leg.startTime || null,
       }];
       storage.set("predictions-log", JSON.stringify(next)).catch(() => {});
       return next;
@@ -1797,105 +1870,4 @@ export default function EdgeBoard() {
               <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em" }}>{n}-PICK {entryType.toUpperCase()} PLAY {useMonteCarlo ? "· CORRELATION-ADJUSTED" : ""}</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setEntryType("power")} style={{ fontFamily: sans, fontSize: 12, padding: "5px 10px", borderRadius: 5, cursor: "pointer", background: entryType === "power" ? COLORS.line : "transparent", color: entryType === "power" ? COLORS.text : COLORS.faint, border: `1px solid ${COLORS.line}` }}>Power</button>
-                <button onClick={() => setEntryType("flex")} disabled={!DEFAULT_FLEX[n]} style={{ fontFamily: sans, fontSize: 12, padding: "5px 10px", borderRadius: 5, cursor: DEFAULT_FLEX[n] ? "pointer" : "not-allowed", background: entryType === "flex" ? COLORS.line : "transparent", color: entryType === "flex" ? COLORS.text : COLORS.faint, border: `1px solid ${COLORS.line}` }}>Flex</button>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-              {entryType === "power" ? (
-                <Field label={`${n}-pick multiplier`}>
-                  <input style={{ ...inputStyle, width: 100 }} value={multipliers[n] ?? ""} onChange={(e) => setMultipliers({ ...multipliers, [n]: Number(e.target.value) })} />
-                </Field>
-              ) : (
-                Object.keys(flexMultipliers[n] || {}).sort((a, b) => b - a).map((k) => (
-                  <Field key={k} label={`${k}/${n} correct`}>
-                    <input style={{ ...inputStyle, width: 90 }} value={flexMultipliers[n][k]} onChange={(e) => setFlexMultipliers({ ...flexMultipliers, [n]: { ...flexMultipliers[n], [k]: Number(e.target.value) } })} />
-                  </Field>
-                ))
-              )}
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12, marginBottom: 16 }}>
-              <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
-                <div style={{ fontSize: 11, color: COLORS.faint, fontFamily: mono }}>WIN PROB (ALL CORRECT){useMonteCarlo ? " · SIMULATED" : ""}</div>
-                <div style={{ fontSize: 20, color: COLORS.text, fontFamily: mono, marginTop: 4 }}>{pct(winProb)}</div>
-              </div>
-              <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: 12 }}>
-                <div style={{ fontSize: 11, color: COLORS.faint, fontFamily: mono }}>BREAKEVEN PROB {topMult ? `(1 / ${topMult}x)` : ""}</div>
-                <div style={{ fontSize: 20, color: COLORS.text, fontFamily: mono, marginTop: 4 }}>{pct(breakeven)}</div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: isPositive ? "rgba(53,196,140,0.1)" : "rgba(255,92,92,0.08)", border: `1px solid ${isPositive ? COLORS.green : COLORS.red}`, borderRadius: 8, padding: "14px 16px" }}>
-              <div>
-                <div style={{ fontSize: 11, color: COLORS.faint, fontFamily: mono, marginBottom: 2 }}>EXPECTED VALUE / $1 STAKED</div>
-                <div style={{ fontSize: 24, fontFamily: mono, fontWeight: 600, color: isPositive ? COLORS.green : COLORS.red }}>{evPerDollar >= 0 ? "+" : ""}{(evPerDollar * 100).toFixed(1)}%</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, color: isPositive ? COLORS.green : COLORS.red, fontFamily: sans, fontWeight: 600, fontSize: 13 }}>
-                {isPositive ? <TrendingUp size={18} /> : <TrendingDown size={18} />} {isPositive ? "+EV PLAY" : "-EV PLAY"}
-              </div>
-            </div>
-          </div>
-        )}
-
-        <CalibrationPanel predictions={predictions} onGrade={gradePrediction} />
-
-        <CLVPanel predictions={predictions} />
-
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, marginBottom: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: mono, fontSize: 12, color: COLORS.muted, letterSpacing: "0.06em", marginBottom: 12 }}>
-            <History size={14} /> LINE HISTORY
-          </div>
-          {historyIndex.length === 0 ? (
-            <p style={{ color: COLORS.faint, fontSize: 12, margin: 0, fontFamily: mono }}>Add a leg via "De-vig from books" to start tracking its fair probability over time.</p>
-          ) : (
-            <>
-              <select style={{ ...inputStyle, cursor: "pointer", marginBottom: 14 }} value={selectedHistoryProp || ""} onChange={(e) => selectHistoryProp(e.target.value)}>
-                <option value="" disabled>Select a tracked prop…</option>
-                {historyIndex.map((h) => <option key={h.slug} value={h.slug}>{h.name}</option>)}
-              </select>
-              {historyLoading && <p style={{ color: COLORS.faint, fontSize: 12 }}>Loading…</p>}
-              {!historyLoading && historyData.length > 0 && (
-                <>
-                  {historyData.length > 1 && delta != null && (
-                    <div style={{ display: "flex", gap: 16, marginBottom: 12, fontFamily: mono, fontSize: 12 }}>
-                      <span style={{ color: COLORS.faint }}>OPEN: <span style={{ color: COLORS.text }}>{pct(opening.fairProb)}</span></span>
-                      <span style={{ color: COLORS.faint }}>NOW: <span style={{ color: COLORS.text }}>{pct(current.fairProb)}</span></span>
-                      <span style={{ color: Math.abs(delta) >= 3 ? (delta > 0 ? COLORS.green : COLORS.red) : COLORS.muted }}>
-                        Δ {delta >= 0 ? "+" : ""}{delta.toFixed(1)} pts {Math.abs(delta) >= 3 ? (delta > 0 ? "· steam toward your side" : "· steam away from your side") : ""}
-                      </span>
-                    </div>
-                  )}
-                  <div style={{ height: 180 }}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={historyChart}>
-                        <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
-                        <XAxis dataKey="idx" tick={{ fill: COLORS.faint, fontSize: 11 }} stroke={COLORS.line} />
-                        <YAxis tick={{ fill: COLORS.faint, fontSize: 11 }} stroke={COLORS.line} domain={["dataMin - 3", "dataMax + 3"]} />
-                        <Tooltip contentStyle={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, fontFamily: mono, fontSize: 12 }} labelFormatter={(v) => `Entry #${v}`} formatter={(v) => [`${v}%`, "Fair prob"]} />
-                        <Line type="monotone" dataKey="fairPct" stroke={COLORS.green} strokeWidth={2} dot={{ r: 3 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </>
-              )}
-              {!historyLoading && selectedHistoryProp && historyData.length === 0 && <p style={{ color: COLORS.faint, fontSize: 12 }}>No snapshots yet for this prop.</p>}
-            </>
-          )}
-        </div>
-
-        {legs.length === 0 && (
-          <div style={{ color: COLORS.faint, fontSize: 13, textAlign: "center", padding: "40px 0", fontFamily: mono }}>Add a leg above to populate the board.</div>
-        )}
-
-        <p style={{ color: COLORS.faint, fontSize: 11, marginTop: 24, lineHeight: 1.5 }}>
-          Vig is now removed with the power method (compresses extreme prices better than simple proportional scaling),
-          and when multiple books agree, tighter (lower-hold) lines are weighted more heavily. The "n books" tag on
-          each leg tells you how much agreement backs that number — treat single-book legs with more caution.
-          Correlation values are still your own estimate. PrizePicks multipliers vary by state/promotion — verify
-          in-app. No calculator guarantees profit.
-        </p>
-      </div>
-    </div>
-  );
-}
+                <button onClick={() => setEntryType("flex")} disabled={!DEFAULT_FLEX[n]} style={{ fontFamily: sans, fontSize: 12, padding: "5px 10px", borderRadius: 5, cursor: DEFAULT_FLEX[n] ? "pointer" : "not-allowed", background: entryType === "flex" ? COLORS.line : "transparent", color: entryTyp
