@@ -88,10 +88,10 @@ export default function EdgeBoard() {
 
         {/* Multi-Sport Navigation */}
         <div style={{ display: 'flex', gap: '10px', marginBottom: '25px', flexWrap: 'wrap' }}>
-          <button onClick={() => setActiveSport('americanfootball_nfl')} style={{ backgroundColor: activeSport === 'americanfootball_nfl' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏈 NFL</button>
-          <button onClick={() => setActiveSport('americanfootball_ncaaf')} style={{ backgroundColor: activeSport === 'americanfootball_ncaaf' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CFB</button>
-          <button onClick={() => setActiveSport('basketball_nba')} style={{ backgroundColor: activeSport === 'basketball_nba' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏀 NBA</button>
-          <button onClick={() => setActiveSport('basketball_ncaab')} style={{ backgroundColor: activeSport === 'basketball_ncaab' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CBB</button>
+          <button onClick={() => setActiveSport('americanfootball_nfl')} style.backgroundColor={activeSport === 'americanfootball_nfl' ? '#00b37e' : '#202024'} style={{ color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏈 NFL</button>
+          <button onClick={() => setActiveSport('americanfootball_ncaaf')} style.backgroundColor={activeSport === 'americanfootball_ncaaf' ? '#00b37e' : '#202024'} style={{ color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CFB</button>
+          <button onClick={() => setActiveSport('basketball_nba')} style.backgroundColor={activeSport === 'basketball_nba' ? '#00b37e' : '#202024'} style={{ color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏀 NBA</button>
+          <button onClick={() => setActiveSport('basketball_ncaab')} style.backgroundColor={activeSport === 'basketball_ncaab' ? '#00b37e' : '#202024'} style={{ color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CBB</button>
         </div>
 
         {error && <div style={{ padding: '15px', backgroundColor: 'rgba(247, 90, 104, 0.1)', border: '1px solid #f75a68', borderRadius: '6px', color: '#f75a68', marginBottom: '20px' }}>⚠️ {error}</div>}
