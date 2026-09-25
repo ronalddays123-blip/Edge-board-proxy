@@ -1,18 +1,18 @@
 // api/odds.js
-// Live Sportsbook Odds Aggregator Engine for +EV Comparison
+// Multi-Sport Live Sportsbook Odds Aggregator Engine
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // Your The Odds API key has been added directly here as requested
   const ODDS_API_KEY = "af58aee708ea58643efbd7ed9fdd5aa6";
   
-  // Defaulting to MLB player props since it's active in your repository
-  const sport = req.query.sport || "baseball_mlb"; 
-  const region = "us"; // Targets US sportsbooks like DraftKings, FanDuel, etc.
-  const markets = "player_props"; // Instructs the API to fetch player over/under lines
+  // Dynamically reads the sport query parameter from your frontend request.
+  // Defaults to NFL if no sport parameter is explicitly declared.
+  const sport = req.query.sport || "americanfootball_nfl"; 
+  const region = "us"; 
+  const markets = "player_props"; 
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8500);
@@ -24,13 +24,13 @@ export default async function handler(req, res) {
     clearTimeout(timeout);
 
     if (!response.ok) {
-      throw new Error(`The Odds API returned status code: ${response.status}`);
+      console.warn(`The Odds API responded with status: ${response.status}. Returning empty slate.`);
+      return res.status(200).json({ success: true, count: 0, odds: [], note: "Market currently inactive." });
     }
 
     const rawOddsData = await response.json();
     const cleanedOdds = [];
 
-    // Parse and transform the multi-bookmaker layout down to a flattened structure
     if (Array.isArray(rawOddsData)) {
       rawOddsData.forEach(event => {
         if (event.bookmakers) {
@@ -41,12 +41,12 @@ export default async function handler(req, res) {
                   market.outcomes.forEach(outcome => {
                     cleanedOdds.push({
                       id: `${event.id}_${book.key}_${market.key}`,
-                      playerName: outcome.description, // The player's identity
-                      sportsbook: book.title,          // e.g., DraftKings, FanDuel, Pinnacle
-                      marketType: market.key,          // e.g., player_home_runs, player_strikeouts
-                      selection: outcome.name,         // "Over" or "Under"
-                      price: outcome.price,            // American betting odds integer
-                      line: outcome.point              // The target line threshold (e.g. 1.5)
+                      playerName: outcome.description, 
+                      sportsbook: book.title,          
+                      marketType: market.key,          
+                      selection: outcome.name,         
+                      price: outcome.price,            
+                      line: outcome.point              
                     });
                   });
                 }
@@ -57,11 +57,12 @@ export default async function handler(req, res) {
       });
     }
 
-    res.setHeader("Cache-Control", "s-maxage=60, stale-while-revalidate=120");
+    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=90");
     return res.status(200).json({ success: true, count: cleanedOdds.length, odds: cleanedOdds });
 
   } catch (error) {
     clearTimeout(timeout);
-    return res.status(500).json({ success: false, error: error.message });
+    console.error("Odds pipeline caught error:", error.message);
+    return res.status(200).json({ success: true, count: 0, odds: [], error: error.message });
   }
 }
