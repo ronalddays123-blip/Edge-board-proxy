@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 export default function EdgeBoard() {
   const [prizepicksData, setPrizepicksData] = useState([]);
   const [sportsbookData, setSportsbookData] = useState({});
-  const [loadingPP, setLoadingPP] = useState(false); // 💡 Hard-set to false so the dashboard NEVER freezes
+  const [loadingPP, setLoadingPP] = useState(false);
   const [loadingOdds, setLoadingOdds] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -22,7 +22,6 @@ export default function EdgeBoard() {
         } else if (ppJson && Array.isArray(ppJson.data)) {
           setPrizepicksData(ppJson.data);
         } else {
-          // If the payload format shifts, handle it gracefully
           const rawRows = ppJson?.projections || ppJson?.data || [];
           if (Array.isArray(rawRows)) setPrizepicksData(rawRows);
         }
@@ -178,3 +177,6 @@ export default function EdgeBoard() {
                             <span style={{ fontSize: '12px', color: '#4e4e5a', fontStyle: 'italic' }}>
                               No sportsbook metrics found
                             </span>
+                          )}
+                        </div>
+                      </td>
