@@ -4,55 +4,53 @@ import React, { useState, useEffect } from 'react';
 export default function EdgeBoard() {
   const [prizepicksData, setPrizepicksData] = useState([]);
   const [sportsbookData, setSportsbookData] = useState({});
-  const [loadingPP, setLoadingPP] = useState(true);
-  const [loadingOdds, setLoadingOdds] = useState(true);
+  const [loadingPP, setLoadingPP] = useState(false); // 💡 Hard-set to false so the dashboard NEVER freezes
+  const [loadingOdds, setLoadingOdds] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [activeSport, setActiveSport] = useState('americanfootball_nfl');
 
   useEffect(() => {
-    // 1. Fetch PrizePicks independently so the board loads instantly
     async function fetchPrizePicks() {
       try {
         const ppRes = await fetch('/api/prizepicks');
-        if (!ppRes.ok) throw new Error(`PrizePicks pipeline error: ${ppRes.status}`);
+        if (!ppRes.ok) throw new Error(`PrizePicks server returned status ${ppRes.status}`);
         const ppJson = await ppRes.json();
         
-        if (ppJson.success && Array.isArray(ppJson.projections)) {
+        if (ppJson && ppJson.success && Array.isArray(ppJson.projections)) {
           setPrizepicksData(ppJson.projections);
-        } else if (Array.isArray(ppJson.data)) {
+        } else if (ppJson && Array.isArray(ppJson.data)) {
           setPrizepicksData(ppJson.data);
+        } else {
+          // If the payload format shifts, handle it gracefully
+          const rawRows = ppJson?.projections || ppJson?.data || [];
+          if (Array.isArray(rawRows)) setPrizepicksData(rawRows);
         }
       } catch (err) {
         console.error("PP Fetch Error:", err.message);
-        setError(`PrizePicks error: ${err.message}`);
-      } finally {
-        setLoadingPP(false);
+        setError(`PrizePicks board data connection issue: ${err.message}`);
       }
     }
 
-    // 2. Fetch Sportsbook lines independently in the background
     async function fetchOdds() {
-      setLoadingOdds(true);
       try {
         const oddsRes = await fetch(`/api/odds?sport=${activeSport}`);
         if (!oddsRes.ok) throw new Error(`Odds pipeline error: ${oddsRes.status}`);
         const oddsJson = await oddsRes.json();
 
         const oddsLookup = {};
-        if (oddsJson.success && Array.isArray(oddsJson.odds)) {
+        if (oddsJson && oddsJson.success && Array.isArray(oddsJson.odds)) {
           oddsJson.odds.forEach(item => {
-            const key = item.playerName.toLowerCase().trim();
-            if (!oddsLookup[key]) oddsLookup[key] = [];
-            oddsLookup[key].push(item);
+            if (item && item.playerName) {
+              const key = item.playerName.toLowerCase().trim();
+              if (!oddsLookup[key]) oddsLookup[key] = [];
+              oddsLookup[key].push(item);
+            }
           });
         }
         setSportsbookData(oddsLookup);
       } catch (err) {
         console.error("Odds Fetch Error:", err.message);
-        // We don't set the main error state here so an odds failure doesn't crash the PP screen
-      } finally {
-        setLoadingOdds(false);
       }
     }
 
@@ -67,13 +65,12 @@ export default function EdgeBoard() {
     return () => clearInterval(interval);
   }, [activeSport]);
 
-  const filteredData = prizepicksData.filter(item => {
-    const name = item.playerName || item.attributes?.display_name || "Unknown Player";
-    return name.toLowerCase().includes(searchTerm.toLowerCase());
-  });
-
-  // Only freeze the main screen if the core PrizePicks board fails to load entirely
-  if (loadingPP) return <div style={{ padding: '40px', color: '#fff', textAlign: 'center', fontFamily: 'sans-serif' }}>⚡ Synchronizing Live PrizePicks Boards...</div>;
+  const filteredData = Array.isArray(prizepicksData) 
+    ? prizepicksData.filter(item => {
+        const name = item?.playerName || item?.attributes?.display_name || "";
+        return name.toLowerCase().includes(searchTerm.toLowerCase());
+      })
+    : [];
 
   return (
     <div style={{ backgroundColor: '#121214', minHeight: '100vh', padding: '30px', color: '#e1e1e6', fontFamily: 'sans-serif' }}>
@@ -85,12 +82,9 @@ export default function EdgeBoard() {
             <h1 style={{ margin: '0 0 5px 0', color: '#fff', fontSize: '26px' }}>+EV Market Discrepancy Matrix</h1>
             <p style={{ margin: '0', color: '#7c7c8a', fontSize: '14px' }}>Comparing Board Projections Against Live Sportsbooks</p>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            {loadingOdds && <span style={{ color: '#ffb938', fontSize: '12px' }}>🔄 Syncing Books...</span>}
-            <span style={{ backgroundColor: '#29292e', padding: '8px 16px', borderRadius: '20px', fontSize: '12px', fontWeight: 'bold', border: '1px solid #323238' }}>
-              📊 Props Live: {filteredData.length}
-            </span>
-          </div>
+          <span style={{ backgroundColor: '#29292e', padding: '8px 16px', borderRadius: '20px', fontSize: '12px', fontWeight: 'bold', border: '1px solid #323238' }}>
+            📊 Props Live: {filteredData.length}
+          </span>
         </div>
 
         {/* Multi-Sport Navigation */}
@@ -126,6 +120,7 @@ export default function EdgeBoard() {
             <tbody>
               {filteredData.length > 0 ? (
                 filteredData.map((player, idx) => {
+                  if (!player) return null;
                   const name = player.playerName || player.attributes?.display_name || "Unknown Player";
                   const stat = player.statType || player.attributes?.stat_type || "";
                   const ppLine = player.line !== undefined ? player.line : player.attributes?.line_score || 0;
@@ -138,20 +133,22 @@ export default function EdgeBoard() {
 
                   if (marketBooks.length > 0) {
                     const firstMatch = marketBooks[0];
-                    const bookLine = firstMatch.line;
-                    const diff = bookLine - ppLine;
+                    if (firstMatch && firstMatch.line !== undefined) {
+                      const bookLine = firstMatch.line;
+                      const diff = bookLine - ppLine;
 
-                    if (diff > 0) {
-                      lineDiffText = `🔥 OVER (+${diff.toFixed(1)} Gap)`;
-                      badgeColor = 'rgba(0, 179, 126, 0.15)';
-                      textColor = '#00b37e';
-                    } else if (diff < 0) {
-                      lineDiffText = `🧊 UNDER (${diff.toFixed(1)} Gap)`;
-                      badgeColor = 'rgba(247, 90, 104, 0.15)';
-                      textColor = '#f75a68';
+                      if (diff > 0) {
+                        lineDiffText = `🔥 OVER (+${diff.toFixed(1)} Gap)`;
+                        badgeColor = 'rgba(0, 179, 126, 0.15)';
+                        textColor = '#00b37e';
+                      } else if (diff < 0) {
+                        lineDiffText = `🧊 UNDER (${diff.toFixed(1)} Gap)`;
+                        badgeColor = 'rgba(247, 90, 104, 0.15)';
+                        textColor = '#f75a68';
+                      }
                     }
                   } else {
-                    lineDiffText = loadingOdds ? "Checking Books..." : "No Book Matches";
+                    lineDiffText = "No Book Matches";
                   }
 
                   return (
@@ -176,3 +173,8 @@ export default function EdgeBoard() {
                                 <span>{book.sportsbook}</span>
                                 <span style={{ color: '#fff', fontWeight: 'bold' }}>{book.line} ({book.price > 0 ? `+${book.price}` : book.price})</span>
                               </div>
+                            ))
+                          ) : (
+                            <span style={{ fontSize: '12px', color: '#4e4e5a', fontStyle: 'italic' }}>
+                              No sportsbook metrics found
+                            </span>
