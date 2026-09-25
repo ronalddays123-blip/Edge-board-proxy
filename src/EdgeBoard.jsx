@@ -1,42 +1,30 @@
 // src/EdgeBoard.jsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 
 export default function EdgeBoard() {
   const [prizepicksData, setPrizepicksData] = useState([]);
   const [sportsbookData, setSportsbookData] = useState({});
-  const [loadingPP, setLoadingPP] = useState(false);
-  const [loadingOdds, setLoadingOdds] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [activeSport, setActiveSport] = useState('americanfootball_nfl');
 
   useEffect(() => {
-    async function fetchPrizePicks() {
+    async function syncDataEngine() {
+      setIsRefreshing(true);
       try {
-        const ppRes = await fetch('/api/prizepicks');
-        if (!ppRes.ok) throw new Error(`PrizePicks server returned status ${ppRes.status}`);
-        const ppJson = await ppRes.json();
-        
-        if (ppJson && ppJson.success && Array.isArray(ppJson.projections)) {
-          setPrizepicksData(ppJson.projections);
-        } else if (ppJson && Array.isArray(ppJson.data)) {
-          setPrizepicksData(ppJson.data);
-        } else {
-          const rawRows = ppJson?.projections || ppJson?.data || [];
-          if (Array.isArray(rawRows)) setPrizepicksData(rawRows);
-        }
-      } catch (err) {
-        console.error("PP Fetch Error:", err.message);
-        setError(`PrizePicks board data connection issue: ${err.message}`);
-      }
-    }
+        const [ppRes, oddsRes] = await Promise.all([
+          fetch('/api/prizepicks'),
+          fetch(`/api/odds?sport=${activeSport}`)
+        ]);
 
-    async function fetchOdds() {
-      try {
-        const oddsRes = await fetch(`/api/odds?sport=${activeSport}`);
-        if (!oddsRes.ok) throw new Error(`Odds pipeline error: ${oddsRes.status}`);
+        if (!ppRes.ok) throw new Error(`PrizePicks sync issue (${ppRes.status})`);
+        if (!oddsRes.ok) throw new Error(`Sportsbook sync issue (${oddsRes.status})`);
+
+        const ppJson = await ppRes.json();
         const oddsJson = await oddsRes.json();
 
+        // ⚡ Dictionary mapping for near-instant lookup execution times
         const oddsLookup = {};
         if (oddsJson && oddsJson.success && Array.isArray(oddsJson.odds)) {
           oddsJson.odds.forEach(item => {
@@ -47,88 +35,128 @@ export default function EdgeBoard() {
             }
           });
         }
+
+        const rawRows = ppJson?.projections || ppJson?.data || [];
+        setPrizepicksData(Array.isArray(rawRows) ? rawRows : []);
         setSportsbookData(oddsLookup);
+        setError(null);
       } catch (err) {
-        console.error("Odds Fetch Error:", err.message);
+        console.error("Pipeline Sync Error:", err.message);
+        setError(err.message);
+      } finally {
+        setIsRefreshing(false);
       }
     }
 
-    fetchPrizePicks();
-    fetchOdds();
-
-    const interval = setInterval(() => {
-      fetchPrizePicks();
-      fetchOdds();
-    }, 45000);
-
+    syncDataEngine();
+    const interval = setInterval(syncDataEngine, 45000);
     return () => clearInterval(interval);
   }, [activeSport]);
 
-  const filteredData = Array.isArray(prizepicksData) 
-    ? prizepicksData.filter(item => {
-        const name = item?.playerName || item?.attributes?.display_name || "";
-        return name.toLowerCase().includes(searchTerm.toLowerCase());
-      })
-    : [];
+  // ⚡ useMemo optimizes table searching so the application stays fluid under load
+  const filteredData = useMemo(() => {
+    if (!Array.isArray(prizepicksData)) return [];
+    return prizepicksData.filter(item => {
+      const name = item?.playerName || item?.attributes?.display_name || "";
+      return name.toLowerCase().includes(searchTerm.toLowerCase());
+    });
+  }, [prizepicksData, searchTerm]);
 
   return (
-    <div style={{ backgroundColor: '#121214', minHeight: '100vh', padding: '30px', color: '#e1e1e6', fontFamily: 'sans-serif' }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+    <div style={{ backgroundColor: '#0d0e12', minHeight: '100vh', padding: '40px 20px', color: '#f1f3f9', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif', boxSizing: 'border-box' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto' }}>
         
-        {/* Header Section */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+        {/* Header Block Layout */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '32px', flexWrap: 'wrap', gap: '20px' }}>
           <div>
-            <h1 style={{ margin: '0 0 5px 0', color: '#fff', fontSize: '26px' }}>+EV Market Discrepancy Matrix</h1>
-            <p style={{ margin: '0', color: '#7c7c8a', fontSize: '14px' }}>Comparing Board Projections Against Live Sportsbooks</p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '6px' }}>
+              <h1 style={{ margin: 0, color: '#ffffff', fontSize: '28px', fontWeight: '800', letterSpacing: '-0.5px' }}>EDGEBOARD PRO</h1>
+              <span style={{ backgroundColor: '#1b2d24', color: '#34d399', fontSize: '11px', fontWeight: '700', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(52, 211, 153, 0.2)' }}>QUANT ENGINE ACTIVE</span>
+            </div>
+            <p style={{ margin: 0, color: '#94a3b8', fontSize: '14px' }}>Real-time positive expected value (+EV) market intelligence platform.</p>
           </div>
-          <span style={{ backgroundColor: '#29292e', padding: '8px 16px', borderRadius: '20px', fontSize: '12px', fontWeight: 'bold', border: '1px solid #323238' }}>
-            📊 Props Live: {filteredData.length}
-          </span>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {isRefreshing && <span style={{ color: '#fbbf24', fontSize: '13px', fontWeight: '6px' }}>🔄 Revalidating Feeds...</span>}
+            <div style={{ backgroundColor: '#1e293b', padding: '10px 20px', borderRadius: '12px', fontSize: '13px', fontWeight: '700', border: '1px solid #334155', color: '#f8fafc' }}>
+              🎯 Live Assets Mapped: {filteredData.length}
+            </div>
+          </div>
         </div>
 
-        {/* Multi-Sport Navigation */}
-        <div style={{ display: 'flex', gap: '10px', marginBottom: '25px', flexWrap: 'wrap' }}>
-          <button onClick={() => setActiveSport('americanfootball_nfl')} style={{ backgroundColor: activeSport === 'americanfootball_nfl' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏈 NFL</button>
-          <button onClick={() => setActiveSport('americanfootball_ncaaf')} style={{ backgroundColor: activeSport === 'americanfootball_ncaaf' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CFB</button>
-          <button onClick={() => setActiveSport('basketball_nba')} style={{ backgroundColor: activeSport === 'basketball_nba' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏀 NBA</button>
-          <button onClick={() => setActiveSport('basketball_ncaab')} style={{ backgroundColor: activeSport === 'basketball_ncaab' ? '#00b37e' : '#202024', color: '#fff', border: '1px solid #323238', padding: '10px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CBB</button>
+        {/* Multi-Sport League Selection Panel */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', backgroundColor: '#141722', padding: '6px', borderRadius: '12px', border: '1px solid #1e293b', maxWidth: 'fit-content' }}>
+          {[
+            { id: 'americanfootball_nfl', label: '🏈 NFL' },
+            { id: 'americanfootball_ncaaf', label: '🎓 CFB' },
+            { id: 'basketball_nba', label: '🏀 NBA' },
+            { id: 'basketball_ncaab', label: '🎓 CBB' }
+          ].map(sport => (
+            <button 
+              key={sport.id}
+              onClick={() => setActiveSport(sport.id)} 
+              style={{ 
+                backgroundColor: activeSport === sport.id ? '#3b82f6' : 'transparent', 
+                color: activeSport === sport.id ? '#ffffff' : '#94a3b8', 
+                border: 'none', 
+                padding: '10px 20px', 
+                borderRadius: '8px', 
+                fontSize: '14px', 
+                fontWeight: '700', 
+                cursor: 'pointer', 
+                transition: 'all 0.2s ease'
+              }}
+            >
+              {sport.label}
+            </button>
+          ))}
         </div>
 
-        {error && <div style={{ padding: '15px', backgroundColor: 'rgba(247, 90, 104, 0.1)', border: '1px solid #f75a68', borderRadius: '6px', color: '#f75a68', marginBottom: '20px' }}>⚠️ {error}</div>}
+        {error && (
+          <div style={{ padding: '16px', backgroundColor: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '12px', color: '#f87171', marginBottom: '24px', fontSize: '14px', fontWeight: '500' }}>
+            ⚠️ Network Pipeline Exception: {error}
+          </div>
+        )}
 
-        <input 
-          type="text" 
-          placeholder="🔍 Filter by player name..." 
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          style={{ width: '100%', padding: '14px 20px', fontSize: '16px', backgroundColor: '#202024', border: '1px solid #323238', borderRadius: '8px', color: '#fff', marginBottom: '20px', boxSizing: 'border-box', outline: 'none' }}
-        />
+        {/* Fast Filter Input Wrapper */}
+        <div style={{ position: 'relative', marginBottom: '24px' }}>
+          <input 
+            type="text" 
+            placeholder="🔍 Search specific player profiles or teams..." 
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            style={{ width: '100%', padding: '16px 20px', fontSize: '15px', backgroundColor: '#141722', border: '1px solid #1e293b', borderRadius: '12px', color: '#ffffff', boxSizing: 'border-box', outline: 'none', transition: 'border-color 0.2s', fontFamily: 'inherit' }}
+            onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
+            onBlur={(e) => e.target.style.borderColor = '#1e293b'}
+          />
+        </div>
 
-        {/* Multi-Book Comparison Table */}
-        <div style={{ overflowX: 'auto', backgroundColor: '#202024', borderRadius: '8px', border: '1px solid #323238' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+        {/* Premium Data View Frame */}
+        <div style={{ overflowX: 'auto', backgroundColor: '#141722', borderRadius: '16px', border: '1px solid #1e293b', boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.3)' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '800px' }}>
             <thead>
-              <tr style={{ borderBottom: '2px solid #323238', color: '#7c7c8a', fontSize: '13px', textTransform: 'uppercase' }}>
-                <th style={{ padding: '16px' }}>Player Information</th>
-                <th style={{ padding: '16px' }}>Stat Type</th>
-                <th style={{ padding: '16px', textAlign: 'center' }}>PrizePicks</th>
-                <th style={{ padding: '16px' }}>Sportsbook Markets</th>
-                <th style={{ padding: '16px', textAlign: 'right' }}>Detected Edge</th>
+              <tr style={{ borderBottom: '1px solid #1e293b', color: '#64748b', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                <th style={{ padding: '18px 24px' }}>Player Asset</th>
+                <th style={{ padding: '18px 24px' }}>Market Variant</th>
+                <th style={{ padding: '18px 24px', textAlign: 'center' }}>PrizePicks Projection</th>
+                <th style={{ padding: '18px 24px' }}>Sharp Bookmaker Index</th>
+                <th style={{ padding: '18px 24px', textAlign: 'right' }}>Calculated Edge</th>
               </tr>
             </thead>
             <tbody>
               {filteredData.length > 0 ? (
                 filteredData.map((player, idx) => {
                   if (!player) return null;
-                  const name = player.playerName || player.attributes?.display_name || "Unknown Player";
-                  const stat = player.statType || player.attributes?.stat_type || "";
+                  const name = player.playerName || player.attributes?.display_name || "Unknown Profile";
+                  const stat = player.statType || player.attributes?.stat_type || "N/A";
                   const ppLine = player.line !== undefined ? player.line : player.attributes?.line_score || 0;
+                  const team = player.team || player.attributes?.team || "PROP";
                   
                   const marketBooks = sportsbookData[name.toLowerCase().trim()] || [];
 
-                  let lineDiffText = "Market Aligned";
-                  let badgeColor = "#29292e";
-                  let textColor = "#e1e1e6";
+                  let lineDiffText = "Market Stable";
+                  let badgeBg = '#1e293b';
+                  let textColor = '#94a3b8';
 
                   if (marketBooks.length > 0) {
                     const firstMatch = marketBooks[0];
@@ -137,46 +165,29 @@ export default function EdgeBoard() {
                       const diff = bookLine - ppLine;
 
                       if (diff > 0) {
-                        lineDiffText = `🔥 OVER (+${diff.toFixed(1)} Gap)`;
-                        badgeColor = 'rgba(0, 179, 126, 0.15)';
-                        textColor = '#00b37e';
+                        lineDiffText = `🔥 OVER (+${diff.toFixed(1)})`;
+                        badgeBg = 'rgba(16, 185, 129, 0.12)';
+                        textColor = '#10b981';
                       } else if (diff < 0) {
-                        lineDiffText = `🧊 UNDER (${diff.toFixed(1)} Gap)`;
-                        badgeColor = 'rgba(247, 90, 104, 0.15)';
-                        textColor = '#f75a68';
+                        lineDiffText = `🧊 UNDER (${diff.toFixed(1)})`;
+                        badgeBg = 'rgba(239, 68, 68, 0.12)';
+                        textColor = '#ef4444';
                       }
                     }
                   } else {
-                    lineDiffText = "No Book Matches";
+                    lineDiffText = "No Book Variants";
                   }
 
                   return (
-                    <tr key={player.id || idx} style={{ borderBottom: '1px solid #29292e' }}>
-                      <td style={{ padding: '14px 16px' }}>
-                        <div style={{ fontWeight: 'bold', color: '#fff' }}>{name}</div>
-                        <div style={{ fontSize: '12px', color: '#7c7c8a' }}>{player.team || "PROP"}</div>
+                    <tr 
+                      key={player.id || idx} 
+                      style={{ borderBottom: '1px solid #11141d', transition: 'background-color 0.15s ease' }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#181c2a'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                    >
+                      <td style={{ padding: '16px 24px' }}>
+                        <div style={{ fontWeight: '700', color: '#ffffff', fontSize: '15px' }}>{name}</div>
+                        <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px', fontWeight: '500' }}>{team}</div>
                       </td>
-                      <td style={{ padding: '14px 16px' }}>
-                        <span style={{ backgroundColor: '#29292e', padding: '4px 10px', borderRadius: '4px', fontSize: '13px', border: '1px solid #323238' }}>
-                          {stat.replace('_', ' ')}
-                        </span>
-                      </td>
-                      <td style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 'bold', fontSize: '16px', color: '#fff' }}>
-                        {ppLine}
-                      </td>
-                      <td style={{ padding: '14px 16px' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxWidth: '240px' }}>
-                          {marketBooks.length > 0 ? (
-                            marketBooks.slice(0, 2).map((book, bIdx) => (
-                              <div key={bIdx} style={{ fontSize: '12px', color: '#a9a9b2', display: 'flex', justifyContent: 'space-between', backgroundColor: '#16161a', padding: '4px 8px', borderRadius: '4px' }}>
-                                <span>{book.sportsbook}</span>
-                                <span style={{ color: '#fff', fontWeight: 'bold' }}>{book.line} ({book.price > 0 ? `+${book.price}` : book.price})</span>
-                              </div>
-                            ))
-                          ) : (
-                            <span style={{ fontSize: '12px', color: '#4e4e5a', fontStyle: 'italic' }}>
-                              No sportsbook metrics found
-                            </span>
-                          )}
-                        </div>
-                      </td>
+                      <td style={{ padding: '16px 24px' }}>
+                        <span style={{ backgroundColor: '#1e293b', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: '600', color: '#cbd5e1', border: '1px solid #334155' }}>
