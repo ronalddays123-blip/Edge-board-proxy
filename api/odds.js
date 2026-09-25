@@ -16,7 +16,7 @@ export default async function handler(req, res) {
   const markets = "player_props"; // Tells the API we want player over/unders
 
   // If you haven't put your API key in yet, this sends test data so your website doesn't crash
-  if (ODDS_API_KEY === "YOUR_THE_ODDS_API_KEY_HERE") {
+  if (ODDS_API_KEY === af58aee708ea58643efbd7ed9fdd5aa6) {
     return res.status(200).json({
       success: true,
       message: "API Key placeholder detected. Returning test data.",
