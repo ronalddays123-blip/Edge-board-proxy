@@ -37,48 +37,7 @@ function EdgeBoard() {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeSport, setActiveSport] = useState('americanfootball_nfl');
 
-  useEffect(() => {
-    async function syncDataEngine() {
-      setIsRefreshing(true);
-      try {
-        const [ppRes, oddsRes] = await Promise.all([
-          fetch('/api/prizepicks'),
-          fetch(`/api/odds?sport=${activeSport}`)
-        ]);
 
-        if (!ppRes.ok) throw new Error(`PrizePicks sync issue (${ppRes.status})`);
-        if (!oddsRes.ok) throw new Error(`Sportsbook sync issue (${oddsRes.status})`);
-
-        const ppJson = await ppRes.json();
-        const oddsJson = await oddsRes.json();
-
-        const oddsLookup = {};
-        if (oddsJson && oddsJson.success && Array.isArray(oddsJson.odds)) {
-          oddsJson.odds.forEach(item => {
-            if (item && item.playerName) {
-              const key = item.playerName.toLowerCase().trim();
-              if (!oddsLookup[key]) oddsLookup[key] = [];
-              oddsLookup[key].push(item);
-            }
-          });
-        }
-
-        const rawRows = ppJson?.projections || ppJson?.data || [];
-        setPrizepicksData(Array.isArray(rawRows) ? rawRows : []);
-        setSportsbookData(oddsLookup);
-        setError(null);
-      } catch (err) {
-        console.error("Pipeline Sync Error:", err.message);
-        setError(err.message);
-      } finally {
-        setIsRefreshing(false);
-      }
-    }
-
-    syncDataEngine();
-    const interval = setInterval(syncDataEngine, 45000);
-    return () => clearInterval(interval);
-  }, [activeSport]);
 
   const filteredData = useMemo(() => {
     if (!Array.isArray(prizepicksData)) return [];
