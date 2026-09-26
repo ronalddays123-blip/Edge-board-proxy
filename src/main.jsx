@@ -208,3 +208,61 @@ function EdgeBoard() {
                       style={{ borderBottom: '1px solid #11141d' }}
                     >
                       <td style={{ padding: '16px 24px' }}>
+                                                <div style={{ fontWeight: '700', color: '#ffffff', fontSize: '15px' }}>{name}</div>
+                        <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px', fontWeight: '500' }}>{team}</div>
+                      </td>
+                      <td style={{ padding: '16px 24px' }}>
+                        <span style={{ backgroundColor: '#1e293b', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: '600', color: '#cbd5e1', border: '1px solid #334155' }}>
+                          {stat.replace(/_/g, ' ').toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ padding: '16px 24px', textAlign: 'center', fontWeight: '800', fontSize: '18px', color: '#ffffff' }}>
+                        {ppLine}
+                      </td>
+                      <td style={{ padding: '16px 24px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          {marketBooks.length > 0 ? (
+                            marketBooks.slice(0, 2).map((book, bIdx) => (
+                              <div key={bIdx} style={{ fontSize: '12px', color: '#94a3b8', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#0d0e12', padding: '6px 12px', borderRadius: '6px', border: '1px solid #1e293b', width: '200px' }}>
+                                <span>{book.sportsbook}</span>
+                                <span style={{ color: '#ffffff', fontWeight: '700' }}>{book.line} <span style={{ color: '#64748b', fontWeight: '500', fontSize: '11px' }}>({book.price > 0 ? `+${book.price}` : book.price})</span></span>
+                              </div>
+                            ))
+                          ) : (
+                            <span style={{ fontSize: '13px', color: '#475569', fontStyle: 'italic', fontWeight: '500' }}>No active book deviations found</span>
+                          )}
+                        </div>
+                      </td>
+                      <td style={{ padding: '16px 24px', textAlign: 'right' }}>
+                        <span style={{ backgroundColor: badgeBg, color: textColor, padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: '800', border: `1px solid ${textColor}22`, display: 'inline-block', letterSpacing: '0.2px' }}>
+                          {lineDiffText}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan="5" style={{ padding: '40px', textAlign: 'center', color: '#64748b', fontSize: '14px', fontWeight: '500' }}>
+                    No market assets found matching active filter criteria.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// 🚀 INITIALIZE APPLICATION MOUNTING
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <EdgeBoard />
+    </ErrorBoundary>
+  </React.StrictMode>,
+);
+
