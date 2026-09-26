@@ -1,5 +1,5 @@
 // api/prizepicks.js
-// Production League Isolation Engine matching PrizePicks Internal Numerical Keys
+// Production League Isolation Engine Matching PrizePicks Internal Numerical Keys
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -30,7 +30,7 @@ export default async function handler(req, res) {
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json",
-        "Referer": "https://prizepicks.com",
+        "Referer": "https://app.prizepicks.com/",
       },
     });
 
@@ -70,7 +70,7 @@ export default async function handler(req, res) {
           position: proj.attributes.position || "PROP",
         };
       })
-      // ⚡ STICKY FILTER RULE: Safely retains lines that match our active sport number key
+      // Safely retains lines that match our active sport number key
       .filter(item => item.leagueId === targetId);
 
     res.setHeader("Cache-Control", "public, max-age=0, s-maxage=15, stale-while-revalidate=45");
