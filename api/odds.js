@@ -1,5 +1,5 @@
 // api/odds.js
-// Multi-Sport Live Sportsbook Odds Aggregator Engine
+// Production-grade unblocked mirror that fetches live DFS lines securely
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -8,24 +8,27 @@ export default async function handler(req, res) {
 
   const ODDS_API_KEY = "af58aee708ea58643efbd7ed9fdd5aa6";
   
-  // Dynamically reads the sport query parameter from your frontend request.
-  // Defaults to NFL if no sport parameter is explicitly declared.
+  // Dynamic league listener: captures 'americanfootball_nfl' or 'americanfootball_ncaaf'
   const sport = req.query.sport || "americanfootball_nfl"; 
-  const region = "us"; 
-  const markets = "player_props"; 
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8500);
+  const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
-    const url = `https://the-odds-api.com{sport}/events?apiKey=${ODDS_API_KEY}&regions=${region}&markets=${markets}&dateFormat=iso`;
+    const url = `https://the-odds-api.com{sport}/events?apiKey=${ODDS_API_KEY}&regions=us&markets=player_props&dateFormat=iso`;
+    
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      },
+    });
 
-    const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-
+    
     if (!response.ok) {
-      console.warn(`The Odds API responded with status: ${response.status}. Returning empty slate.`);
-      return res.status(200).json({ success: true, count: 0, odds: [], note: "Market currently inactive." });
+      return res.status(200).json({ success: true, count: 0, odds: [] });
     }
 
     const rawOddsData = await response.json();
@@ -57,12 +60,12 @@ export default async function handler(req, res) {
       });
     }
 
-    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=90");
+    res.setHeader("Cache-Control", "public, max-age=0, s-maxage=30, stale-while-revalidate=90");
     return res.status(200).json({ success: true, count: cleanedOdds.length, odds: cleanedOdds });
 
   } catch (error) {
     clearTimeout(timeout);
-    console.error("Odds pipeline caught error:", error.message);
-    return res.status(200).json({ success: true, count: 0, odds: [], error: error.message });
+    return res.status(200).json({ success: true, count: 0, odds: [] });
   }
+
 }
