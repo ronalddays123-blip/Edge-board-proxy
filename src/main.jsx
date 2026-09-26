@@ -11,7 +11,7 @@ function AppDataEngine() {
     let isAlive = true;
     async function syncData() {
       try {
-        // Map the website button variables over to the exact league names PrizePicks requires
+        // Map the website button variables over to the exact league names PrizePicks backend expects
         let ppSportParam = 'NFL';
         if (activeSport.includes('ncaaf')) ppSportParam = 'CFB';
         else if (activeSport.includes('basketball_nba')) ppSportParam = 'NBA';
@@ -87,7 +87,7 @@ function AppDataEngine() {
             );
           })
         ) : (
-          <div style={{ color: '#64748b', textAlign: 'center' }}>Connecting to data streams... Please wait.</div>
+          <div style={{ color: '#64748b', textAlign: 'center' }}>No active boards currently open for this sport. Check back closer to game time!</div>
         )}
       </div>
     </div>
@@ -98,5 +98,4 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <AppDataEngine />
   </React.StrictMode>
-
 );
