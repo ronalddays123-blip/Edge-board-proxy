@@ -13,7 +13,6 @@ function AppDataEngine() {
       try {
         const oddsSportParam = activeSport === 'NFL' ? 'americanfootball_nfl' : 'americanfootball_ncaaf';
 
-        // Hits both the live PrizePicks scanner and the live sportsbook odds tracker simultaneously
         const [ppRes, oddsRes] = await Promise.all([
           fetch(`/api/prizepicks?sport=${activeSport}`),
           fetch(`/api/odds?sport=${oddsSportParam}`)
@@ -24,7 +23,6 @@ function AppDataEngine() {
 
         if (!isAlive) return;
 
-        // Group external sportsbook line records into a fast dictionary index array
         const oddsLookup = {};
         if (oddsJson?.success && Array.isArray(oddsJson.odds)) {
           oddsJson.odds.forEach(item => {
@@ -64,30 +62,29 @@ function AppDataEngine() {
             const stat = player.statType || "Prop";
             const ppLine = player.line || 0;
             
-            // Look up matching player lines from external bookmakers inside our state map
             const matches = sportsbookData[name.toLowerCase().trim()] || [];
             
-            // Search the match array to pull a real sportsbook line benchmark (e.g. from DraftKings or Pinnacle)
-            let bookLineText = "Scanning Markets...";
-            let calculatedEdgeText = "Market Stable";
+            let bookLineText = "Market Stable";
+            let calculatedEdgeText = "Market Aligned";
             let edgeColor = "#64748b";
 
-            if (matches.length > 0) {
-              const bookMatch = matches[0]; // Extract first matching sportsbook profile
-              const bookLine = bookMatch.line;
-              bookLineText = `${bookMatch.sportsbook}: ${bookLine}`;
+            // ⚡ FIXED DATA ARRAY ITERATOR LOOP:
+            // Safely scans inside the bookmaker array object to cross-reference lines
+            if (Array.isArray(matches) && matches.length > 0) {
+              const bookMatch = matches[0]; // Safely grabs the primary sportsbook data row
+              if (bookMatch && bookMatch.line !== undefined) {
+                const bookLine = parseFloat(bookMatch.line);
+                bookLineText = `${bookMatch.sportsbook}: ${bookLine}`;
 
-              // Math Engine: Check if a structural discrepancy variant exists
-              const diff = bookLine - ppLine;
-              if (diff > 0) {
-                calculatedEdgeText = `🔥 OVER EDGE (+${diff.toFixed(1)})`;
-                edgeColor = '#00b37e'; // Green indicator for over value
-              } else if (diff < 0) {
-                calculatedEdgeText = `🧊 UNDER EDGE (${diff.toFixed(1)})`;
-                edgeColor = '#ef4444'; // Red indicator for under value
+                const diff = bookLine - ppLine;
+                if (diff > 0) {
+                  calculatedEdgeText = `🔥 OVER EDGE (+${diff.toFixed(1)})`;
+                  edgeColor = '#00b37e'; 
+                } else if (diff < 0) {
+                  calculatedEdgeText = `🧊 UNDER EDGE (${diff.toFixed(1)})`;
+                  edgeColor = '#ef4444'; 
+                }
               }
-            } else {
-              bookLineText = "Market Stable";
             }
 
             return (
