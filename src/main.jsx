@@ -11,10 +11,15 @@ function AppDataEngine() {
     let isAlive = true;
     async function syncData() {
       try {
+        // Map the button states to the formatting required by your backends
+        const oddsSportParam = activeSport === 'NFL' ? 'americanfootball_nfl' : 'americanfootball_ncaaf';
+
+        // ⚡ Fixed syntax: All routes sit safely inside the Promise array
         const [ppRes, oddsRes] = await Promise.all([
-          fetch('/api/prizepicks'),
-          fetch(`/api/odds?sport=${activeSport === 'NFL' ? 'americanfootball_nfl' : 'americanfootball_ncaaf'}`)
+          fetch(`/api/prizepicks?sport=${activeSport}`),
+          fetch(`/api/odds?sport=${oddsSportParam}`)
         ]);
+        
         const ppJson = await ppRes.json();
         const oddsJson = await oddsRes.json();
 
@@ -34,7 +39,7 @@ function AppDataEngine() {
         setPrizepicksData(ppJson?.projections || []);
         setSportsbookData(oddsLookup);
       } catch (err) {
-        console.error(err);
+        console.error("Data tracking exception:", err.message);
       }
     }
     syncData();
@@ -44,7 +49,7 @@ function AppDataEngine() {
 
   return (
     <div style={{ backgroundColor: '#0d0e12', minHeight: '100vh', padding: '30px', color: '#f1f3f9', fontFamily: 'sans-serif' }}>
-      <h1 style={{ color: '#fff', margin: '0 0 5px 0' }}>EDGEBOARD PRO</h1>
+      <h1 style={{ color: '#fff', margin: '0 0 5px 0', fontSize: '24px', fontWeight: 'bold' }}>EDGEBOARD PRO</h1>
       <p style={{ color: '#94a3b8', margin: '0 0 20px 0', fontSize: '14px' }}>Total Active Board Props: {prizepicksData.length}</p>
       
       <div style={{ display: 'flex', gap: '8px', marginBottom: '25px' }}>
@@ -76,7 +81,7 @@ function AppDataEngine() {
             );
           })
         ) : (
-          <div style={{ color: '#64748b', textAlign: 'center' }}>Querying open slates... Refreshing data feed framework.</div>
+          <div style={{ color: '#64748b', textAlign: 'center', padding: '20px' }}>Synchronizing data feed framework... Setting open slates.</div>
         )}
       </div>
     </div>
