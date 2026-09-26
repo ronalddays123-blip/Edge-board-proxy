@@ -5,22 +5,15 @@ import ReactDOM from 'react-dom/client';
 function AppDataEngine() {
   const [prizepicksData, setPrizepicksData] = useState([]);
   const [sportsbookData, setSportsbookData] = useState({});
-  const [activeSport, setActiveSport] = useState('americanfootball_nfl');
+  const [activeSport, setActiveSport] = useState('NFL');
 
   useEffect(() => {
     let isAlive = true;
     async function syncData() {
       try {
-        // Map the website button variables over to the exact league names PrizePicks backend expects
-        let ppSportParam = 'NFL';
-        if (activeSport.includes('ncaaf')) ppSportParam = 'CFB';
-        else if (activeSport.includes('basketball_nba')) ppSportParam = 'NBA';
-        else if (activeSport.includes('ncaab')) ppSportParam = 'CBB';
-        else if (activeSport.includes('mlb')) ppSportParam = 'MLB';
-
         const [ppRes, oddsRes] = await Promise.all([
-          fetch(`/api/prizepicks?sport=${ppSportParam}`),
-          fetch(`/api/odds?sport=${activeSport}`)
+          fetch('/api/prizepicks'),
+          fetch(`/api/odds?sport=${activeSport === 'NFL' ? 'americanfootball_nfl' : 'americanfootball_ncaaf'}`)
         ]);
         const ppJson = await ppRes.json();
         const oddsJson = await oddsRes.json();
@@ -38,10 +31,10 @@ function AppDataEngine() {
           });
         }
 
-        setPrizepicksData(ppJson?.projections || ppJson?.data || []);
+        setPrizepicksData(ppJson?.projections || []);
         setSportsbookData(oddsLookup);
       } catch (err) {
-        console.error("Data fetch error:", err.message);
+        console.error(err);
       }
     }
     syncData();
@@ -52,26 +45,22 @@ function AppDataEngine() {
   return (
     <div style={{ backgroundColor: '#0d0e12', minHeight: '100vh', padding: '30px', color: '#f1f3f9', fontFamily: 'sans-serif' }}>
       <h1 style={{ color: '#fff', margin: '0 0 5px 0' }}>EDGEBOARD PRO</h1>
-      <p style={{ color: '#94a3b8', margin: '0 0 20px 0', fontSize: '14px' }}>Active Boards Mapped: {prizepicksData.length}</p>
+      <p style={{ color: '#94a3b8', margin: '0 0 20px 0', fontSize: '14px' }}>Total Active Board Props: {prizepicksData.length}</p>
       
-      {/* Expanded Multi-Sport Panel */}
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '25px', flexWrap: 'wrap' }}>
-        <button onClick={() => setActiveSport('americanfootball_nfl')} style={{ backgroundColor: activeSport === 'americanfootball_nfl' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏈 NFL</button>
-        <button onClick={() => setActiveSport('americanfootball_ncaaf')} style={{ backgroundColor: activeSport === 'americanfootball_ncaaf' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CFB</button>
-        <button onClick={() => setActiveSport('basketball_nba')} style={{ backgroundColor: activeSport === 'basketball_nba' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏀 NBA</button>
-        <button onClick={() => setActiveSport('basketball_ncaab')} style={{ backgroundColor: activeSport === 'basketball_ncaab' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CBB</button>
-        <button onClick={() => setActiveSport('baseball_mlb')} style={{ backgroundColor: activeSport === 'baseball_mlb' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>⚾ MLB</button>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '25px' }}>
+        <button onClick={() => setActiveSport('NFL')} style={{ backgroundColor: activeSport === 'NFL' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🏈 NFL</button>
+        <button onClick={() => setActiveSport('CFB')} style={{ backgroundColor: activeSport === 'CFB' ? '#00b37e' : '#202024', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>🎓 CFB</button>
       </div>
 
       <div style={{ backgroundColor: '#141722', borderRadius: '12px', padding: '20px', border: '1px solid #1e293b' }}>
         {prizepicksData.length > 0 ? (
-          prizepicksData.slice(0, 75).map((player, idx) => {
+          prizepicksData.slice(0, 80).map((player, idx) => {
             const name = player.playerName || "Unknown Player";
             const stat = player.statType || "Prop";
             const ppLine = player.line || 0;
             
             const matches = sportsbookData[name.toLowerCase().trim()] || [];
-            const bookLine = matches.length > 0 ? matches[0].line : "No Match";
+            const bookLine = matches.length > 0 ? matches[0].line : "Stable Market";
 
             return (
               <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid #1e293b' }}>
@@ -87,7 +76,7 @@ function AppDataEngine() {
             );
           })
         ) : (
-          <div style={{ color: '#64748b', textAlign: 'center' }}>No active boards currently open for this sport. Check back closer to game time!</div>
+          <div style={{ color: '#64748b', textAlign: 'center' }}>Querying open slates... Refreshing data feed framework.</div>
         )}
       </div>
     </div>
@@ -98,4 +87,5 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <AppDataEngine />
   </React.StrictMode>
+
 );
